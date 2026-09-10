@@ -1,0 +1,5 @@
+pyarrow>=18,<24; python_version < "3.14"
+pyarrow>=22,<24; python_version >= "3.14"
+psycopg2-binary>=2.9.12,<3
+pandas>=2.2
+sqlalchemy>=2.0

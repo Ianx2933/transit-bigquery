@@ -1,0 +1,32 @@
+# Credentials — never commit.
+.env
+.env.*
+*.pem
+*.key
+service-account*.json
+gcp-credentials*.json
+
+# Keep the Korean operating guide local.
+/README_KO.md
+
+# Exported data and local transfer records.
+/export_*/
+*.parquet
+*.csv
+*.tsv
+/manifest.json
+/load_state.json
+
+# Python caches and the local virtual environment.
+__pycache__/
+*.py[cod]
+*.egg-info/
+/.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
