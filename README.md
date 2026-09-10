@@ -1,7 +1,5 @@
 # transit-bigquery
 
-*(SeoulTransitPlatform의 분석 절반을 BigQuery 스타 스키마로 옮긴 작업)*
-
 Migrates the analytical half of
 [SeoulTransitPlatform](https://github.com/Ianx2933/SeoulTransitPlatform) to BigQuery as a
 partitioned, clustered star schema, reconciled row-for-row against the PostGIS source. The
@@ -9,13 +7,9 @@ serving endpoints stayed in PostGIS: a 192 ms point-lookup budget is the wrong w
 scan-priced columnar warehouse, and moving it would have undone the indexing work it depends
 on.
 
-*(핵심 문장은 두 번째다 — 무엇을 옮겼는지가 아니라 무엇을 옮기지 않았고 왜인지.)*
-
 ---
 
 ## What moved, and what did not
-
-*(이 절이 이 저장소에서 가장 중요한 부분이다.)*
 
 BigQuery is an analytical warehouse: columnar, scan-priced, with no concept of a point lookup
 returning in 200 ms. The platform's district-demand endpoint was taken from 9.5–12.9 s to
@@ -24,7 +18,7 @@ returning in 200 ms. The platform's district-demand endpoint was taken from 9.5�
 
 So the split is by workload, not by table:
 
-| Stays in PostGIS *(서빙 — 지연시간 예산이 있는 것)* | Moved to BigQuery *(분석 — 스캔해도 되는 것)* |
+| Stays in PostGIS  | Moved to BigQuery |
 |---|---|
 | District-demand and node-catchment endpoints | Hourly boarding facts (5.58M rows) |
 | `ST_Covers` against dong polygons at query time | Aggregations by route, stop, hour |
@@ -39,8 +33,6 @@ stays on PostGIS.
 ---
 
 ## Two datasets
-
-*(원본 복제와 차원 모델을 분리한 이유.)*
 
 | Dataset | Contents |
 |---|---|
@@ -60,8 +52,6 @@ half.
 
 ## Grain
 
-*(팩트 테이블의 그레인. 인터뷰에서 가장 먼저 물어보는 것.)*
-
 The source primary key is `(use_ym, route_no, stop_ars, hour)`. There is **no date column** —
 `use_ym` is a `YYYYMM` string. The source is a monthly hourly aggregate, not a daily
 observation series.
@@ -74,7 +64,7 @@ Two consequences:
 day-level detail would imply observations that do not exist. `service_month` is carried as a
 readable `DATE` pinned to the first of the month; month attributes derive from it directly.
 
-**No OD fact.** *(OD 팩트를 만들지 않았다.)* An earlier draft had `origin_stop_key` /
+**No OD fact.** An earlier draft had `origin_stop_key` /
 `dest_stop_key` on the boarding fact. The source has neither. Boardings are measured per stop;
 OD is *estimated* downstream by a separate pipeline. Mixing a measured fact and a derived fact
 in one table leaves the grain undefined. If OD is warehoused later it gets its own table,
@@ -126,13 +116,11 @@ connects the two repositories.
 `dataset_id` is carried rather than dropped because the upstream terrain tables are published
 as immutable versioned snapshots, not as columns on the stop master. A dimension that kept the
 slope value but discarded which snapshot produced it would make two loads taken months apart
-indistinguishable. *(어느 스냅샷에서 나온 값인지가 값 자체만큼 중요하다.)*
+indistinguishable.
 
 ---
 
 ## Partitioning
-
-*(파티셔닝 — 여기서 함정을 하나 만났다.)*
 
 `fact_boarding` is partitioned by `service_ym` (INT64) using `RANGE_BUCKET`, **not** by
 `service_month` (DATE).
@@ -150,9 +138,8 @@ $ bq query "SELECT count(*) FROM transit_warehouse.fact_boarding WHERE service_m
 ```
 
 The load job reports `DONE`, `bq show` reports 0 rows, and no error is raised anywhere.
-*(에러 없이 조용히 0행이 되는 것이 이 함정의 고약한 점이다.)* This is the same class of
-silent-emptying failure the upstream terrain snapshots were designed around — a derived value
-written where the next operation destroys it, with the interface still returning success.
+This is the same class of silent-emptying failure the upstream terrain snapshots were designed around
+ — a derived value written where the next operation destroys it, with the interface still returning success.
 
 `RANGE_BUCKET` on an integer is outside that rule. Pruning and `require_partition_filter`
 behave identically — and since the source is a monthly aggregate, a day-grain partition key
@@ -185,21 +172,18 @@ instead, which is a stronger check than a column constraint anyway.
 
 ## Stop matching and provenance
 
-*(정류장 매칭 — 데이터가 깨끗한 척하지 않는 부분.)*
-
 Of 12,529 distinct stops in the fact source, 10,713 match the Seoul stop master on ARS code.
 The remainder are two distinct populations:
 
 | `match_method` | Rows | Coordinates | What they are |
 |---|---|---|---|
 | `ars_exact` | 10,713 | yes | matched to Seoul stop master |
-| `gyeonggi_unmatched` | 1,815 | no | Gyeonggi-do stops on cross-boundary routes — outside the Seoul master's scope *(성남·판교 등 경기도 구간)* |
+| `gyeonggi_unmatched` | 1,815 | no | Gyeonggi-do stops on cross-boundary routes — outside the Seoul master's scope |
 | `virtual_terminal` | 1 | no | route origin/terminus marker |
 
 Together the unmatched rows are **4.5% of total boardings** — the tail, not the core.
 
-The single `virtual_terminal` row is deliberate, not a loss. *(가상 종점 133개가 1행으로
-합쳐지는 것은 설계상 예상된 결과다.)* Every terminus marker carries the literal ARS `~` across
+The single `virtual_terminal` row is deliberate, not a loss. Every terminus marker carries the literal ARS `~` across
 133 distinct names. Since `stop_ars` is the fact table's join key, the dimension holds exactly
 one row for it — the grain of a dimension is its key, not the number of source labels that map
 to it. Splitting them would require a synthetic key the fact table does not have.
@@ -212,10 +196,9 @@ inherit a filtered universe.
 This is the same discipline the source platform already applies — its four-stage OD identifier
 recovery and three-stage coordinate matcher both record per-row method and confidence.
 Carrying that into the warehouse rather than flattening it on the way in is the point.
-*(프로비넌스가 이관을 살아남는 것 — 원본 플랫폼의 방식을 그대로 유지했다.)*
 
-**A known SCD candidate.** *(Type 2가 필요한 후보를 발견했고 Phase 2로 미뤘다.)* The 1,815
-Gyeonggi stops carry 2,963 distinct names — ARS `05181` appears as both
+**A known SCD candidate.** 
+The 1,815 Gyeonggi stops carry 2,963 distinct names — ARS `05181` appears as both
 `국가기록원성남분원.코이카` and `나라기록관.코이카`. That is a rename history, and the textbook
 argument for a Type 2 slowly-changing dimension. This phase keeps `dim_stop` as Type 1 on the
 most recent name and records the decision rather than pretending the question does not exist.
@@ -260,7 +243,6 @@ Row counts, aggregate totals and distinct key counts, both sides:
 
 Referential integrity holds in both directions: every `stop_key` in the fact table resolves in
 `dim_stop` (zero orphans), and the three `match_method` populations sum to 12,529.
-*(팩트의 모든 정류장 키가 차원에서 해소된다 — 고아 키 0.)*
 
 Per-partition counts also reconcile against the monthly counts in the source:
 
