@@ -261,6 +261,14 @@ That join fans out on the Gyeonggi stops carrying multiple names, inflating the 
 The correct baseline is measured on the fact table alone.
 A validation query that joins is not validating the fact table.
 
+**What this reconciliation does not prove.** The two sides agree exactly, but the source they
+agree on was itself wrong. The upstream loader kept only one row per stop *visit* where a
+route passes the same stop twice, understating monthly boarding by about 3.6%; the defect was
+found and fixed in the platform repository after this load. So the figures above establish
+that the transfer was faithful, not that the numbers were right. Those are different claims,
+and a warehouse that only ever checks itself against its source can never distinguish them.
+The reload described below is what closes the gap.
+
 ---
 
 ## Scan cost
@@ -339,12 +347,17 @@ sql/04_staging_geometry_checks.sql   WKT round-trip check on staging
 
 ## Current scope
 
-Loaded: 2025-01 through 2025-06, 5.58M rows. The full collection target is roughly 30M rows
-across 2024-01 to 2026-08; the remaining months run on the existing collector and load
-incrementally through the same path.
+Loaded: 2025-01 through 2025-06, 5.58M rows — **extracted before the upstream loader fix**,
+so these six months carry the understated boarding figures described in Validation above.
+They are a working warehouse on stale data, not a current one.
+
+The source now holds 2024-01 through 2026-08, about 30M rows, rebuilt and reconciled. Moving
+to it is a full reload rather than an incremental extension: the six months already here have
+to be replaced, not appended to.
 
 Loaded and reconciled: `fact_boarding`, `dim_stop`, `dim_route`.
 
-Not yet done: `dim_district` — the dong boundary table is empty in the current instance and
-has no loader script upstream; Airflow orchestration of the load; the Type 2 decision above;
+Not yet done: the 32-month reload; `dim_district` — the dong boundary table now holds the
+1,208 administrative units of the 2025-06-30 snapshot, though it is still imported manually
+with no loader script upstream; Airflow orchestration of the load; the Type 2 decision above;
 and coordinate interpolation for the unmatched populations using `(route_no, terminal_seq)`.
