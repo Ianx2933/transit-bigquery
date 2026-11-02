@@ -54,7 +54,8 @@ exposed the stop-name issue described below, which the Python version never meas
 | Dataset | Contents |
 |---|---|
 | `transit_staging` | 1:1 copy of 13 source tables: same column names and grain, geometry as EPSG:4326 WKT |
-| dbt target dataset | Modelled tables. Set in the dbt profile (`dbt_dev` during development) |
+| `transit_marts` | Modelled tables, built with `dbt build --target prod` |
+| `dbt_dev` | Development copy of the same models, the default dbt target |
 | `transit_warehouse` | The original six-month load, made before the upstream loader fix. Kept for reference only |
 
 Staging and the modelled tables are kept in separate datasets so it is always clear which
@@ -284,7 +285,8 @@ Build the models:
 ```bash
 gcloud auth application-default login
 cd transit_dbt
-dbt build
+dbt build                  # development, writes to dbt_dev
+dbt build --target prod    # writes to transit_marts
 ```
 
 `~/.dbt/profiles.yml` is kept outside the repository. It uses OAuth, so no key file is needed:
@@ -298,6 +300,14 @@ transit_dbt:
       method: oauth
       project: <project-id>
       dataset: dbt_dev
+      location: asia-northeast3
+      threads: 4
+      maximum_bytes_billed: 5000000000
+    prod:
+      type: bigquery
+      method: oauth
+      project: <project-id>
+      dataset: transit_marts
       location: asia-northeast3
       threads: 4
       maximum_bytes_billed: 5000000000
@@ -327,7 +337,6 @@ legacy/                      Warehouse DDL and validation from before dbt (six-m
 
 ## To do
 
-- A `prod` dbt target with its own dataset, separate from `dbt_dev`.
 - `route_type` on `dim_route`. Seoul route names indicate the bus type (village, trunk,
   branch, night), which would explain the naming differences above.
 - `dim_district`. The dong boundary table has the 1,208 administrative units of the
