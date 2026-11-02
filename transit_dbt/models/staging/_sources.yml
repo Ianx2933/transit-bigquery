@@ -2,5 +2,10 @@ version: 2
 sources:
   - name: staging
     schema: transit_staging
+    description: 1:1 copy of the PostgreSQL source, loaded by transit_bigquery.py. No transformation.
     tables:
       - name: hourly_bus_stop_passenger
+      - name: bus_stop_location
+        description: Seoul stop master. Korean column names are aliased to English at export.
+      - name: bus_stop_terrain_stats
+      - name: terrain_active_dataset

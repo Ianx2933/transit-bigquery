@@ -1,15 +1,9 @@
-Welcome to your new dbt project!
+# transit_dbt
 
-### Using the starter project
+Transformation layer for transit-bigquery. Reads the 1:1 staging copy in
+`transit_staging` and builds the dimensional model. See the repository
+README for design decisions, grain and validation.
 
-Try running the following commands:
-- dbt run
-- dbt test
-
-
-### Resources:
-- Learn more about dbt [in the docs](https://docs.getdbt.com/docs/introduction)
-- Check out [Discourse](https://discourse.getdbt.com/) for commonly asked questions and answers
-- Join the [chat](https://community.getdbt.com/) on Slack for live discussions and support
-- Find [dbt events](https://events.getdbt.com) near you
-- Check out [the blog](https://blog.getdbt.com/) for the latest news on dbt's development and best practices
+```bash
+dbt build      # models + tests; fails if any month stops reconciling to staging
+```

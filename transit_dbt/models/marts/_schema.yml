@@ -8,14 +8,59 @@ models:
     columns:
       - name: service_ym
         description: Service month as YYYYMM integer. Partition key.
-        tests: [not_null]
+        data_tests: [not_null]
       - name: service_month
         description: First day of the service month, for readability. Not the partition key.
-        tests: [not_null]
+        data_tests: [not_null]
       - name: hour
-        tests: [not_null]
+        data_tests: [not_null]
       - name: route_no
-        tests: [not_null]
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_route')
+                field: route_no
       - name: stop_key
         description: Stop ARS code. Includes virtual terminal '~' and Gyeonggi stops on purpose.
-        tests: [not_null]
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_stop')
+                field: stop_key
+
+  - name: dim_route
+    description: One row per route. Most recent name wins; route_name_count shows renames.
+    columns:
+      - name: route_no
+        data_tests: [unique, not_null]
+
+  - name: dim_stop
+    description: >
+      One row per stop ARS, with master match, coordinates and terrain.
+      stop_name is the most recent name without the route ordinal suffix.
+    columns:
+      - name: stop_key
+        data_tests: [unique, not_null]
+      - name: match_method
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['ars_exact', 'gyeonggi_unmatched', 'virtual_terminal']
+
+  - name: dim_stop_name_history
+    description: Every (stop, name) pair observed in the source, route ordinal removed, with first and last month seen.
+
+  - name: route_stop_sequence
+    description: >
+      Ordinal of each stop along each route, parsed from the source name suffix.
+      A route that passes a stop twice has two rows for that pair.
+    columns:
+      - name: route_no
+        data_tests: [not_null]
+      - name: stop_key
+        data_tests: [not_null]
+      - name: route_stop_seq
+        data_tests: [not_null]

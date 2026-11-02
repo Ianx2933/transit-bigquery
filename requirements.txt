@@ -3,3 +3,5 @@ pyarrow>=22,<24; python_version >= "3.14"
 psycopg2-binary>=2.9.12,<3
 pandas>=2.2
 sqlalchemy>=2.0
+dbt-core>=1.12,<1.13
+dbt-bigquery>=1.12,<1.13

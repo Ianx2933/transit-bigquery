@@ -1,133 +1,186 @@
 # transit-bigquery
 
-Migrates the analytical half of
-[SeoulTransitPlatform](https://github.com/Ianx2933/SeoulTransitPlatform) to BigQuery as a
-partitioned, clustered star schema, reconciled row-for-row against the PostGIS source. The
-serving endpoints stayed in PostGIS: a 192 ms point-lookup budget is the wrong workload for a
-scan-priced columnar warehouse, and moving it would have undone the indexing work it depends
-on.
+This repository moves the analytical part of
+[SeoulTransitPlatform](https://github.com/Ianx2933/SeoulTransitPlatform) into BigQuery as a
+partitioned and clustered star schema, and checks it month by month against the PostgreSQL
+source. The serving endpoints were left in PostGIS. They have a 192 ms latency target, and
+BigQuery is priced and built for scans, not point lookups.
+
+Loading is done in Python and transformation in dbt. 32 months of data (2024-01 to 2026-08,
+29.9M rows) are loaded and modelled.
 
 ---
 
-## What moved, and what did not
+## What moved and what stayed
 
-BigQuery is an analytical warehouse: columnar, scan-priced, with no concept of a point lookup
-returning in 200 ms. The platform's district-demand endpoint was taken from 9.5–12.9 s to
-192 ms through query-plan analysis and GIST / composite / expression indexes. That is a
-*serving* concern. Moving it here would have made it slower and more expensive.
+The platform's district-demand endpoint went from 9.5–12.9 s to 192 ms after query-plan
+analysis and GIST, composite and expression indexes. Running it on BigQuery would make it
+slower and more expensive, so the split follows the workload rather than the tables:
 
-So the split is by workload, not by table:
-
-| Stays in PostGIS  | Moved to BigQuery |
+| Stays in PostGIS | Moved to BigQuery |
 |---|---|
-| District-demand and node-catchment endpoints | Hourly boarding facts (5.58M rows) |
-| `ST_Covers` against dong polygons at query time | Aggregations by route, stop, hour |
+| District-demand and node-catchment endpoints | Hourly boarding facts (29.9M rows) |
+| `ST_Covers` against dong polygons at query time | Aggregations by route, stop and hour |
 | GIST-indexed spatial predicates | Terrain statistics joined to stops |
-| Anything with a latency budget | Ad-hoc analyst queries |
+| Anything with a latency target | Ad-hoc analysis |
 
-BigQuery has a native `GEOGRAPHY` type and `ST_DWITHIN` / `ST_DISTANCE` / `ST_CONTAINS`, but
-it is not PostGIS — no GIST index control, a different function set, spherical geometry only.
-Stop points are loaded as `GEOGRAPHY` to demonstrate BigQuery GIS; the spatial serving path
-stays on PostGIS.
+BigQuery has a `GEOGRAPHY` type and functions such as `ST_DWITHIN` and `ST_CONTAINS`, but it
+has no index control comparable to GIST and works on spherical geometry only. Stop points are
+stored as `GEOGRAPHY` here for analysis; spatial serving stays on PostGIS.
 
 ---
 
-## Two datasets
+## Pipeline
+
+```
+PostgreSQL --(transit_bigquery.py)--> transit_staging --(dbt)--> modelled tables
+```
+
+**Extract and load: `transit_bigquery.py`.** Exports 13 source tables from a read-only
+`REPEATABLE READ` snapshot and writes a manifest with a SHA-256 checksum per file and row
+counts and passenger totals per month. A load-state file makes reruns idempotent, and the
+script will not append to a table it has no load record for. After loading, it recomputes the
+monthly totals in BigQuery and stops if any month differs. It does not transform anything.
+
+**Transform: `transit_dbt/`.** All renames, casts, joins and deduplication are dbt models.
+`dbt build` runs the models and their tests in one step, so a build fails if the data does not
+pass.
+
+The first version did the transformation in Python (`extract.py`: PostgreSQL to Parquet to the
+warehouse tables). I moved it to dbt to keep the logic in SQL next to the data, to get tests
+on every build, and to make it clear where each column comes from. Writing the models also
+exposed the stop-name issue described below, which the Python version never measured.
 
 | Dataset | Contents |
 |---|---|
-| `transit_staging` | A faithful 1:1 copy of twelve source tables — same column names, same grain, geometry as EPSG:4326 WKT |
-| `transit_warehouse` | Only the modelled tables: `fact_boarding`, `dim_stop`, `dim_route` |
+| `transit_staging` | 1:1 copy of 13 source tables: same column names and grain, geometry as EPSG:4326 WKT |
+| dbt target dataset | Modelled tables. Set in the dbt profile (`dbt_dev` during development) |
+| `transit_warehouse` | The original six-month load, made before the upstream loader fix. Kept for reference only |
 
-Merging them would leave a reader unable to tell which tables were designed and which were
-copied, and that distinction is the point of the exercise. Staging also gives the validation
-queries something to reconcile against without reaching back into PostgreSQL every time.
-
-`transit_bigquery.py` does the staging half: a read-only `REPEATABLE READ` snapshot, a
-manifest with per-file SHA-256, a load-state record making reruns idempotent, and a refusal to
-append to any table it has no successful load record for. `extract.py` does the modelling
-half.
+Staging and the modelled tables are kept in separate datasets so it is always clear which
+tables are copies and which are designed. The tests also reconcile against staging instead of
+querying PostgreSQL each time.
 
 ---
 
 ## Grain
 
-The source primary key is `(use_ym, route_no, stop_ars, hour)`. There is **no date column** —
-`use_ym` is a `YYYYMM` string. The source is a monthly hourly aggregate, not a daily
-observation series.
+The source primary key is `(use_ym, route_no, stop_ars, hour)`. There is no date column:
+`use_ym` is a `YYYYMM` string, and the data is a monthly aggregate by hour.
 
-Fact grain: **one row per route × stop × hour × calendar month.**
+Fact grain: one row per route, stop, hour and calendar month.
 
-Two consequences:
+**No `dim_date`.** The data has no daily detail, so a daily date dimension would suggest
+observations that do not exist. `service_month` is stored as a `DATE` set to the first of the
+month for readability.
 
-**No `dim_date`.** *(날짜 차원을 만들지 않았다.)* A dense date dimension over data with no
-day-level detail would imply observations that do not exist. `service_month` is carried as a
-readable `DATE` pinned to the first of the month; month attributes derive from it directly.
-
-**No OD fact.** An earlier draft had `origin_stop_key` /
-`dest_stop_key` on the boarding fact. The source has neither. Boardings are measured per stop;
-OD is *estimated* downstream by a separate pipeline. Mixing a measured fact and a derived fact
-in one table leaves the grain undefined. If OD is warehoused later it gets its own table,
-named so the distinction survives.
+**No OD fact.** An earlier draft had origin and destination stop keys on the boarding fact,
+but the source has neither. Boardings are measured per stop, while OD is estimated later by a
+separate pipeline. Putting measured and estimated values in one table would leave the grain
+unclear. If OD is added later it will be a separate table.
 
 ---
 
 ## Star schema
 
 ```
-                    ┌──────────────────┐
-                    │    dim_route     │
-                    │──────────────────│
-                    │ route_no    (PK) │
-                    │ route_name       │
-                    └────────┬─────────┘
-                             │
-        ┌────────────────────▼─────────────────────┐
-        │            fact_boarding                 │
-        │──────────────────────────────────────────│
-        │ service_ym      INT64   ← partition key  │
-        │ service_month   DATE                     │
-        │ hour            INT64                    │
-        │ route_no        STRING  → dim_route      │
-        │ stop_key        STRING  → dim_stop       │
-        │ boardings       INT64   ← measure        │
-        │ alightings      INT64   ← measure        │
-        └────────────────────┬─────────────────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │     dim_stop     │
-                    │──────────────────│
-                    │ stop_key    (PK) │
-                    │ stop_name        │
-                    │ match_method     │
-                    │ terminal_seq     │
-                    │ lon / lat / geog │
-                    │ elev_m           │
-                    │ slope_pct        │
-                    │ dataset_id       │
-                    └──────────────────┘
+                    +--------------------+
+                    |     dim_route      |
+                    |--------------------|
+                    | route_no      (PK) |
+                    | route_name         |
+                    | route_name_count   |
+                    +---------+----------+
+                              |
+        +---------------------v--------------------+
+        |              fct_boarding                |
+        |------------------------------------------|
+        | service_ym      INT64   (partition key)  |
+        | service_month   DATE                     |
+        | hour            INT64                    |
+        | route_no        STRING  -> dim_route     |
+        | stop_key        STRING  -> dim_stop      |
+        | boardings       INT64   (measure)        |
+        | alightings      INT64   (measure)        |
+        +---------------------+--------------------+
+                              |
+                    +---------v----------+
+                    |      dim_stop      |
+                    |--------------------|
+                    | stop_key      (PK) |
+                    | stop_name          |
+                    | stop_name_count    |
+                    | match_method       |
+                    | lon / lat / geog   |
+                    | elev_m             |
+                    | slope_pct          |
+                    | dataset_id         |
+                    +--------------------+
+
+dim_stop_name_history   every (stop, name) pair with the first and last month it appears
+route_stop_sequence     position of each stop on each route, with the months it applies to
 ```
 
-`dim_stop` carries the terrain attributes from
-[geo-raster-pipeline](https://github.com/Ianx2933/geo-raster-pipeline) — `elev_m`,
-`slope_pct`, `dataset_id`. The raster snapshot becomes stop attributes here, which is what
-connects the two repositories.
+`dim_stop` includes terrain attributes from
+[geo-raster-pipeline](https://github.com/Ianx2933/geo-raster-pipeline): `elev_m`, `slope_pct`
+and `dataset_id`. This is where the two repositories connect. Only the active terrain dataset
+is joined, so publishing another terrain run will not duplicate stops.
 
-`dataset_id` is carried rather than dropped because the upstream terrain tables are published
-as immutable versioned snapshots, not as columns on the stop master. A dimension that kept the
-slope value but discarded which snapshot produced it would make two loads taken months apart
-indistinguishable.
+`dataset_id` is kept because the terrain tables upstream are published as versioned
+snapshots. Without it, two loads made months apart could not be told apart.
+
+When the source has several values for one key, such as a route or stop that appears under
+more than one name, the value from the most recent month is used, with ties broken
+alphabetically. This makes every build produce the same result. The old `DISTINCT ON` in
+`extract.py` did not guarantee that.
+
+---
+
+## Stop names
+
+Stop names in the source end with the stop's position on the route, for example
+`동묘앞(00029)`. A stop served by several routes appears with a different number on each one.
+Counted as-is, 68% of Seoul stops looked as if they had been renamed during the 32 months. The
+earlier six-month analysis made the same mistake and reported "1,815 Gyeonggi stops with 2,963
+names" as rename history.
+
+With the number split off into a separate column (`route_stop_seq`), the counts are:
+
+| `match_method` | Stops | Stops with more than one name |
+|---|---|---|
+| `ars_exact` | 10,800 | 1,468 (14%) |
+| `gyeonggi_unmatched` | 2,044 | 156 (8%) |
+| `virtual_terminal` | 1 | n/a |
+
+Most of the remaining cases are actual renames that follow one after another: exit numbers
+added (`태릉입구역` to `태릉입구역1번출구`), apartment or building names changed, and one spelling
+correction (`파인에빈뉴` to `파인에비뉴`). `dim_stop` uses the latest name, and
+`dim_stop_name_history` keeps every name with the months it was used. This history is built
+from the monthly data rather than with a dbt snapshot, since snapshots only record changes
+from the time they start running.
+
+Some stops have two names in the same months:
+
+- Village buses (마을버스) and city buses sometimes name the same stop differently. ARS `04266`
+  is `서울숲1번출입구` on village bus 성동13 and `서울숲1번출구` on city bus 121.
+- ARS `20117` appears as both `문촌마을6.7단지...` and `사육신공원` until 2024-11. These are
+  unrelated names, so the code is probably shared or reused in the source.
+
+The route position is kept in `route_stop_sequence` at the grain `(route_no, stop_key,
+route_stop_seq)`. A route that passes the same stop twice (outbound and at the turnaround) has
+two rows for that pair. This is the same case that caused the upstream loader bug described
+under Validation.
 
 ---
 
 ## Partitioning
 
-`fact_boarding` is partitioned by `service_ym` (INT64) using `RANGE_BUCKET`, **not** by
+`fct_boarding` is partitioned on `service_ym` (INT64) with integer-range partitioning, not on
 `service_month` (DATE).
 
-This was not the first choice. The BigQuery sandbox enforces a 60-day partition expiration
-that cannot be disabled, and expiry is measured from the *partition's own date*. Day-based
-partitioning over 2025 data therefore expires on arrival:
+The project started in the BigQuery sandbox, which sets a 60-day partition expiration that
+cannot be turned off. Expiration is counted from the partition's own date, so a day-partitioned
+table of 2025 data was empty right after loading:
 
 ```
 $ bq load --source_format=PARQUET transit_warehouse.fact_boarding fact_boarding.parquet
@@ -137,137 +190,63 @@ $ bq query "SELECT count(*) FROM transit_warehouse.fact_boarding WHERE service_m
 0
 ```
 
-The load job reports `DONE`, `bq show` reports 0 rows, and no error is raised anywhere.
-This is the same class of silent-emptying failure the upstream terrain snapshots were designed around
- — a derived value written where the next operation destroys it, with the interface still returning success.
+The job reported `DONE` and no error was shown. Integer-range partitions are not affected by
+this rule. The data is monthly anyway, so a daily partition key would not have fit. I kept the
+integer key after enabling billing.
 
-`RANGE_BUCKET` on an integer is outside that rule. Pruning and `require_partition_filter`
-behave identically — and since the source is a monthly aggregate, a day-grain partition key
-was never the right choice to begin with.
-
-```sql
-PARTITION BY RANGE_BUCKET(service_ym, GENERATE_ARRAY(202401, 202700, 1))
-CLUSTER BY route_no, stop_key
-OPTIONS (require_partition_filter = TRUE)
-```
-
-`require_partition_filter = TRUE` forces every query to filter on the partition column — the
-single most effective guard against a `SELECT *` that scans the whole table and bills for it:
+**Sandbox settings stay after billing is enabled.** Linking a billing account removes the
+limit for new datasets, but existing settings are not changed. Both datasets still had a 60-day
+`defaultTableExpirationMs`, and each table kept its own expiration time. When I checked, the
+twelve staging tables had already been deleted and the three warehouse tables were due to
+expire in seven days. Each setting has to be cleared separately:
 
 ```
-$ bq query "SELECT service_ym, count(*) FROM transit_warehouse.fact_boarding GROUP BY service_ym"
-Cannot query over table 'transit_warehouse.fact_boarding' without a filter over
-column(s) 'service_ym' that can be used for partition elimination
+bq update --default_table_expiration 0 --default_partition_expiration 0 <dataset>
+bq update --expiration 0 <dataset>.<table>
 ```
 
-Clustering is on `route_no, stop_key`, matching both the source primary key order and the
-filters analysts actually use. Clustering is free and reduces scan further.
+The table is clustered on `route_no, stop_key`, which follows the source key order and the
+filters most queries use.
 
-Columns are `NULLABLE` rather than `REQUIRED`. Parquet written by pandas/pyarrow is nullable
-by default, and a `REQUIRED` column rejects the load with *"Field X has changed mode from
-REQUIRED to NULLABLE"*. Integrity is asserted by `sql/02_validate.sql` against the source
-instead, which is a stronger check than a column constraint anyway.
-
----
-
-## Stop matching and provenance
-
-Of 12,529 distinct stops in the fact source, 10,713 match the Seoul stop master on ARS code.
-The remainder are two distinct populations:
-
-| `match_method` | Rows | Coordinates | What they are |
-|---|---|---|---|
-| `ars_exact` | 10,713 | yes | matched to Seoul stop master |
-| `gyeonggi_unmatched` | 1,815 | no | Gyeonggi-do stops on cross-boundary routes — outside the Seoul master's scope |
-| `virtual_terminal` | 1 | no | route origin/terminus marker |
-
-Together the unmatched rows are **4.5% of total boardings** — the tail, not the core.
-
-The single `virtual_terminal` row is deliberate, not a loss. Every terminus marker carries the literal ARS `~` across
-133 distinct names. Since `stop_ars` is the fact table's join key, the dimension holds exactly
-one row for it — the grain of a dimension is its key, not the number of source labels that map
-to it. Splitting them would require a synthetic key the fact table does not have.
-
-Unmatched rows are not deleted. They are carried with `match_method` recording how each
-identifier was resolved, for two reasons: aggregate totals must reconcile against the source,
-and an analyst doing spatial work needs to exclude them *explicitly* rather than silently
-inherit a filtered universe.
-
-This is the same discipline the source platform already applies — its four-stage OD identifier
-recovery and three-stage coordinate matcher both record per-row method and confidence.
-Carrying that into the warehouse rather than flattening it on the way in is the point.
-
-**A known SCD candidate.** 
-The 1,815 Gyeonggi stops carry 2,963 distinct names — ARS `05181` appears as both
-`국가기록원성남분원.코이카` and `나라기록관.코이카`. That is a rename history, and the textbook
-argument for a Type 2 slowly-changing dimension. This phase keeps `dim_stop` as Type 1 on the
-most recent name and records the decision rather than pretending the question does not exist.
-
-Stop names embed a five-digit sequence — `한림아파트(00020)` — the stop's ordinal position
-along the route. `(route_no, terminal_seq)` is unique across all 38,941 route-stop pairs and
-every stop name carries one, so it is available as a fallback key for coordinate interpolation
-later.
-
----
-
-## Load path
-
-```
-PostgreSQL  →  Parquet  →  bq load  →  transit_staging  →  transit_warehouse
-                                       (1:1 source copy)   (dimensional model)
-```
-
-No GCS bucket: the sandbox has no billing account, so `bq load` reads the local Parquet file
-directly.
-
-The Arrow schema is pinned explicitly rather than inferred per batch: a batch where a column
-happens to be all-null would infer a different type and be rejected by the writer.
-
-Passenger counts are stored as `double precision` in Postgres but hold no fractional part
-(verified: zero rows where `value <> floor(value)`), so they are narrowed to `INT64`.
-
-Extraction of 5.58M rows takes ~27 s.
+The original table had `require_partition_filter = TRUE`. The dbt model does not, because the
+reconciliation tests read all months and would each need a placeholder filter to pass. Cost is
+limited instead by `maximum_bytes_billed` in the dbt profile, which rejects any query that
+would scan more than the set amount.
 
 ---
 
 ## Validation
 
-Row counts, aggregate totals and distinct key counts, both sides:
+Validation is done by the dbt tests, which run on every `dbt build`.
 
-| | PostgreSQL | BigQuery |
-|---|---|---|
-| Rows | 5,581,104 | 5,581,104 |
-| Boardings | 793,161,784 | 793,161,784 |
-| Alightings | 783,117,413 | 783,117,413 |
-| Distinct stops | 12,529 | 12,529 |
-
-Referential integrity holds in both directions: every `stop_key` in the fact table resolves in
-`dim_stop` (zero orphans), and the three `match_method` populations sum to 12,529.
-
-Per-partition counts also reconcile against the monthly counts in the source:
-
-| Partition | Rows |
+| Test | Fails when |
 |---|---|
-| 202501 | 930,720 |
-| 202502 | 929,976 |
-| 202503 | 930,600 |
-| 202504 | 930,744 |
-| 202505 | 931,128 |
-| 202506 | 927,936 |
+| Monthly reconciliation to staging | Any month's row count, boarding sum or alighting sum differs from the source copy |
+| Unique `(service_ym, route_no, stop_key, hour)` | The fact grain has duplicates |
+| Non-empty fact | The fact table has no rows after a successful load |
+| `dim_stop` row count equals distinct source stops | A join drops stops or duplicates them |
+| `relationships` from fact to dimensions | A route or stop key in the fact has no dimension row |
+| Unique and not-null keys, accepted `match_method` values | Standard dimension checks |
 
-**One note on how the baseline was computed.** 
-An initial boarding total of 793,288,854 came from a query that joined to the stop master. 
-That join fans out on the Gyeonggi stops carrying multiple names, inflating the sum by 127,070. 
-The correct baseline is measured on the fact table alone.
-A validation query that joins is not validating the fact table.
+Current figures:
 
-**What this reconciliation does not prove.** The two sides agree exactly, but the source they
-agree on was itself wrong. The upstream loader kept only one row per stop *visit* where a
-route passes the same stop twice, understating monthly boarding by about 3.6%; the defect was
-found and fixed in the platform repository after this load. So the figures above establish
-that the transfer was faithful, not that the numbers were right. Those are different claims,
-and a warehouse that only ever checks itself against its source can never distinguish them.
-The reload described below is what closes the gap.
+| | PostgreSQL | BigQuery (`fct_boarding`) |
+|---|---|---|
+| Rows | 29,855,640 | 29,855,640 |
+| Boardings | 4,509,456,552 | 4,509,456,552 |
+| Months | 32 | 32 |
+| Distinct stops | 12,845 | 12,845 |
+
+The reconciliation compares totals by month only and does not join to the stop table. In the
+first version, a validation query joined to the stop master, and stops with several names
+caused the join to duplicate rows. The boarding total came out as 793,288,854, which was
+127,070 too high. The test is written to avoid that join.
+
+The first six-month load matched the source exactly, but the source itself was wrong. The
+upstream loader kept only one row when a route passed the same stop twice, which understated
+monthly boardings by about 3.6%. Matching the source shows that the copy is correct, not that
+the numbers are. The 32-month reload uses the corrected source. The old six months remain in
+`transit_warehouse` so the difference can still be checked.
 
 ---
 
@@ -276,12 +255,12 @@ The reload described below is what closes the gap.
 | Query range | Bytes scanned |
 |---|---|
 | One month (`service_ym = 202503`) | 22.3 MB |
-| Six months (`202501`–`202506`) | 133.9 MB |
+| Six months (`202501` to `202506`) | 133.9 MB |
 
-Six-fold difference, exactly the partition count. Both are well under the table's 254 MB
-logical size — column pruning reads only `hour` and `boardings`.
-
-Free tier covers 10 GB storage and 1 TB of queries per month, so at this scale cost is zero.
+These were measured on the original six-month table. Each month has about the same number of
+rows after the reload, so the cost per month should be similar. Building the full fact table
+with dbt processes 1.3 GiB. The free tier includes 10 GB of storage and 1 TB of queries per
+month, so the project currently costs nothing.
 
 ---
 
@@ -292,72 +271,67 @@ pip install -r requirements.txt
 python -m unittest test_transit_bigquery      # offline; no PostgreSQL or GCP calls
 ```
 
-**Staging** — 1:1 source copy into `transit_staging`:
+Load the staging copy:
 
 ```bash
-python transit_bigquery.py export --out export_01   # prompts for the password
-python transit_bigquery.py load  --folder export_01
+python transit_bigquery.py export --out export_02   # prompts for the password
+python transit_bigquery.py load  --folder export_02
 bq query --use_legacy_sql=false < sql/04_staging_geometry_checks.sql
 ```
 
-**Warehouse** — the dimensional model in `transit_warehouse`:
+Build the models:
 
 ```bash
-# 1. create tables
-bq query --use_legacy_sql=false < sql/01_create_tables.sql
-
-# 2. extract to Parquet
-set PGPASSWORD=...
-python extract.py
-
-# 3. load
-bq load --replace --source_format=PARQUET transit_warehouse.fact_boarding fact_boarding.parquet
-bq load --replace --source_format=PARQUET transit_warehouse.dim_route    dim_route.parquet
-bq load --replace --source_format=PARQUET transit_warehouse.dim_stop     dim_stop.parquet
-
-# 4. add the GEOGRAPHY column
-bq query --use_legacy_sql=false < sql/03_geography.sql
-
-# 5. reconcile
-bq query --use_legacy_sql=false < sql/02_validate.sql
+gcloud auth application-default login
+cd transit_dbt
+dbt build
 ```
 
-`sql/03_geography.sql` rebuilds the dimension with a `GEOGRAPHY` point rather than issuing an
-`UPDATE`: the sandbox does not support DML, and `CREATE OR REPLACE TABLE AS SELECT` is DDL.
+`~/.dbt/profiles.yml` is kept outside the repository. It uses OAuth, so no key file is needed:
 
-`requirements.txt` pins `pyarrow>=22` and `psycopg2-binary>=2.9.12` — the first releases
-publishing cp314 wheels. Older versions fall back to building from source on Python 3.14 and
-fail without a local Arrow C++ toolchain.
+```yaml
+transit_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: <project-id>
+      dataset: dbt_dev
+      location: asia-northeast3
+      threads: 4
+      maximum_bytes_billed: 5000000000
+```
+
+`requirements.txt` pins `pyarrow>=22` and `psycopg2-binary>=2.9.12`, the first versions with
+Python 3.14 wheels, and `dbt-core` / `dbt-bigquery` 1.12. dbt 1.11 and earlier do not run on
+Python 3.14 (they fail with a `mashumaro` serialization error).
 
 ---
 
 ## Repository layout
 
 ```
-extract.py            Postgres -> Parquet for the dimensional model
-transit_bigquery.py   Read-only snapshot export and idempotent staging load
-test_transit_bigquery.py   Offline tests; no PostgreSQL or GCP calls
-sql/01_create_tables.sql        Warehouse DDL with partitioning and clustering
-sql/02_validate.sql             Reconciliation against the PostGIS source
-sql/03_geography.sql            GEOGRAPHY column, added post-load
+transit_bigquery.py          Snapshot export and verified staging load
+test_transit_bigquery.py     Offline tests; no PostgreSQL or GCP calls
+transit_dbt/
+  models/staging/            Sources and light cleaning of the staging copy
+  models/marts/              fct_boarding, dim_route, dim_stop, dim_stop_name_history,
+                             route_stop_sequence
+  tests/                     Reconciliation and grain tests
 sql/04_staging_geometry_checks.sql   WKT round-trip check on staging
+legacy/                      Warehouse DDL and validation from before dbt (six-month load)
 ```
 
 ---
 
-## Current scope
+## To do
 
-Loaded: 2025-01 through 2025-06, 5.58M rows — **extracted before the upstream loader fix**,
-so these six months carry the understated boarding figures described in Validation above.
-They are a working warehouse on stale data, not a current one.
-
-The source now holds 2024-01 through 2026-08, about 30M rows, rebuilt and reconciled. Moving
-to it is a full reload rather than an incremental extension: the six months already here have
-to be replaced, not appended to.
-
-Loaded and reconciled: `fact_boarding`, `dim_stop`, `dim_route`.
-
-Not yet done: the 32-month reload; `dim_district` — the dong boundary table now holds the
-1,208 administrative units of the 2025-06-30 snapshot, though it is still imported manually
-with no loader script upstream; Airflow orchestration of the load; the Type 2 decision above;
-and coordinate interpolation for the unmatched populations using `(route_no, terminal_seq)`.
+- A `prod` dbt target with its own dataset, separate from `dbt_dev`.
+- `route_type` on `dim_route`. Seoul route names indicate the bus type (village, trunk,
+  branch, night), which would explain the naming differences above.
+- `dim_district`. The dong boundary table has the 1,208 administrative units of the
+  2025-06-30 snapshot but is still imported by hand upstream.
+- Airflow orchestration of export, load and `dbt build`.
+- A flag on `dim_stop` for stops with two names at the same time.
+- Estimated coordinates for unmatched Gyeonggi stops using `route_stop_sequence`.
