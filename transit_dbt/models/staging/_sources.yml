@@ -1,0 +1,6 @@
+version: 2
+sources:
+  - name: staging
+    schema: transit_staging
+    tables:
+      - name: hourly_bus_stop_passenger

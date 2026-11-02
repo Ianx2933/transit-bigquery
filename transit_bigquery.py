@@ -1,9 +1,9 @@
 """Export a read-only PostgreSQL snapshot and load it into BigQuery staging.
 
-This is the ingestion half: a faithful 1:1 copy of twelve source tables into
+This is the ingestion half: a faithful 1:1 copy of thirteen source tables into
 `transit_staging`, with a manifest, per-file checksums and an idempotent load
-record. The dimensional model in `transit_warehouse` is built from that copy --
-see sql/01_create_tables.sql.
+record. The dimensional model is built from that copy by the dbt project
+(transit_dbt/); this script does no transformation.
 
 Requires Python 3.14+. Run --help for available commands.
 
@@ -38,7 +38,11 @@ SPECS = {
  'terrain_stop_dong_assignment': 'dataset_id:s* node_id:s* adm_cd:s adm_nm:s assignment_method:s* candidate_count:i*',
  'terrain_active_dataset': 'singleton:b* dataset_id:s* activated_at:t*',
  'month_day_count': 'use_ym:s* mon:i tue:i wed:i thu:i fri:i sat:i sun_holiday:i',
+ # Raw source of fact_boarding / dim_route / dim_stop. Loaded untransformed;
+ # renames, casts and joins live in dbt models, not here.
+ 'hourly_bus_stop_passenger': 'use_ym:s route_no:s route_name:s stop_id:s stop_ars:s stop_name:s hour:i boarding_passengers:f alighting_passengers:f',
 }
+HOURLY = 'hourly_bus_stop_passenger'
 ALIASES = {'노드id':'node_id','정류장번호':'stop_no','정류장명':'stop_name',
            '경도':'lng','위도':'lat','표준코드여부':'standard_code_flag'}
 PROJECT = 'project-9c77d932-f0d2-47bb-947'
@@ -123,7 +127,7 @@ def export(args):
     manifest={'format_version':1,'snapshot_id':snapshot,'exported_at':now.isoformat(),
               'source_period':None,'source_period_note':'Not inferred from export date. Confirm upstream input period before time-series comparisons.',
               'geometry':'geom_wkt is 2D EPSG:4326 WKT; not yet BigQuery GEOGRAPHY',
-              'tables':{},'demand_totals':[],'complete':False}
+              'tables':{},'demand_totals':[],'hourly_totals':[],'complete':False}
     try:
         conn.set_session(isolation_level='REPEATABLE READ',readonly=True,autocommit=False)
         with conn.cursor() as cur:
@@ -138,6 +142,9 @@ def export(args):
                         raise ValueError(f'Schema mismatch: {table}.{name}: {actual.get(name)}')
             cur.execute('SELECT mode,day_type,COUNT(*),SUM(boarding),SUM(alighting) FROM public.integrated_hourly_transit_demand_light GROUP BY mode,day_type ORDER BY mode,day_type')
             manifest['demand_totals']=[dict(zip(['mode','day_type','row_count','boarding','alighting'],r)) for r in cur.fetchall()]
+            # Per-month control totals for the raw fact source, checked again after load.
+            cur.execute(f'SELECT use_ym,COUNT(*),SUM(boarding_passengers),SUM(alighting_passengers),COUNT(DISTINCT stop_ars) FROM public.{quote(HOURLY)} GROUP BY use_ym ORDER BY use_ym')
+            manifest['hourly_totals']=[dict(zip(['use_ym','row_count','boarding','alighting','distinct_stops'],r)) for r in cur.fetchall()]
         out.mkdir(parents=True)
         for table in SPECS:
             schema,select=export_schema(table)
@@ -162,6 +169,7 @@ def export(args):
             save_json(out/'manifest.json',manifest)
             print(f'OK {table}: {count:,} rows, {path.stat().st_size/1024/1024:.2f} MiB',flush=True)
         if not manifest['demand_totals']: raise ValueError('Demand table is empty; inspect source before loading.')
+        if not manifest['hourly_totals']: raise ValueError(HOURLY+' is empty; inspect source before loading.')
         manifest['complete']=True
         save_json(out/'manifest.json',manifest)
         print(f'EXPORT COMPLETE: {out}\nRead-only PostgreSQL snapshot; no cloud upload yet.')
@@ -220,6 +228,7 @@ def load(args):
         # Load each local file atomically into one table; use a fixed job ID to prevent duplicate submission.
         command=['--job_id='+job,'load','--source_format=PARQUET']
         if table=='integrated_hourly_transit_demand_light': command+=['--clustering_fields=mode,day_type,service_id,node_id']
+        if table==HOURLY: command+=['--clustering_fields=use_ym,route_no,stop_ars']
         command += [target,str(folder/entry['file'])]
         print('LOAD '+table,flush=True)
         bq_call(args,command)
@@ -245,22 +254,44 @@ def compare_totals(expected,actual):
                 raise ValueError(f'Sum mismatch: {key} {col}')
 
 
+def compare_monthly(expected,actual):
+    if not expected: raise ValueError('Manifest has no hourly_totals; export again with this version.')
+    e={str(r['use_ym']):r for r in expected}
+    a={str(r['use_ym']):r for r in actual}
+    if set(e)!=set(a): raise ValueError('Month keys differ: '+', '.join(sorted(set(e)^set(a))))
+    for ym,er in e.items():
+        ar=a[ym]
+        for col in ('row_count','distinct_stops'):
+            if int(er[col])!=int(ar[col]): raise ValueError(f'{col} mismatch: {ym}')
+        for col in ('boarding','alighting'):
+            if er[col] is None or ar[col] is None:
+                if er[col]!=ar[col]: raise ValueError(f'NULL sum mismatch: {ym} {col}')
+            elif not math.isclose(float(er[col]),float(ar[col]),rel_tol=1e-9,abs_tol=1e-6):
+                raise ValueError(f'Sum mismatch: {ym} {col}')
+
+
 def verify(args,m):
     ref=f'`{args.project}.{args.dataset}.integrated_hourly_transit_demand_light`'
     query=f'SELECT mode,day_type,COUNT(*) AS row_count,SUM(boarding) AS boarding,SUM(alighting) AS alighting FROM {ref} GROUP BY mode,day_type ORDER BY mode,day_type'
     result=bq_call(args,['query','--use_legacy_sql=false','--maximum_bytes_billed=2147483648','--max_rows=100',query])
     compare_totals(m['demand_totals'],result)
-    print('VERIFIED: all 12 staging table row counts during load; demand group counts and floating-point sums match. Geometry remains WKT; joins are not yet applied.')
+    ref=f'`{args.project}.{args.dataset}.{HOURLY}`'
+    query=f'SELECT use_ym,COUNT(*) AS row_count,SUM(boarding_passengers) AS boarding,SUM(alighting_passengers) AS alighting,COUNT(DISTINCT stop_ars) AS distinct_stops FROM {ref} GROUP BY use_ym ORDER BY use_ym'
+    result=bq_call(args,['query','--use_legacy_sql=false','--maximum_bytes_billed=4294967296','--max_rows=1000',query])
+    compare_monthly(m.get('hourly_totals') or [],result)
+    months=[r['use_ym'] for r in m['hourly_totals']]
+    print(f'VERIFIED: all {len(SPECS)} staging table row counts during load; demand group totals match; '
+          f'{HOURLY} matches per month ({len(months)} months, {months[0]}..{months[-1]}). Geometry remains WKT; joins are not yet applied.')
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest='action',required=True)
-    e=sub.add_parser('export'); e.add_argument('--out',default='export_01')
+    e=sub.add_parser('export'); e.add_argument('--out',default='export_02')
     e.add_argument('--host',default='localhost'); e.add_argument('--port',type=int,default=5432)
     e.add_argument('--user',default='postgres'); e.add_argument('--dbname',default='Seoul_Transit')
     e.add_argument('--chunk-rows',type=int,default=50000)
-    l=sub.add_parser('load'); l.add_argument('--folder',default='export_01')
+    l=sub.add_parser('load'); l.add_argument('--folder',default='export_02')
     l.add_argument('--project',default=PROJECT); l.add_argument('--dataset',default=DATASET)
     args=p.parse_args()
     if args.action=='export':

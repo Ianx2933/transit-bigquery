@@ -1,0 +1,21 @@
+version: 2
+models:
+  - name: fct_boarding
+    description: >
+      Monthly hourly boarding/alighting per route and stop, 2024-01 onward.
+      One row per (service_ym, route_no, stop_key, hour), matching the
+      source primary key. Integer-range partitioned on service_ym.
+    columns:
+      - name: service_ym
+        description: Service month as YYYYMM integer. Partition key.
+        tests: [not_null]
+      - name: service_month
+        description: First day of the service month, for readability. Not the partition key.
+        tests: [not_null]
+      - name: hour
+        tests: [not_null]
+      - name: route_no
+        tests: [not_null]
+      - name: stop_key
+        description: Stop ARS code. Includes virtual terminal '~' and Gyeonggi stops on purpose.
+        tests: [not_null]

@@ -3,6 +3,7 @@
 .env.*
 *.pem
 *.key
+*.nc
 service-account*.json
 gcp-credentials*.json
 
@@ -30,3 +31,10 @@ venv/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+transit_dbt/target/
+transit_dbt/logs/
+transit_dbt/dbt_packages/
+export_*/
+
+logs/
