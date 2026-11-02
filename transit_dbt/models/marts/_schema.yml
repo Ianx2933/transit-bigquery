@@ -31,10 +31,25 @@ models:
                 field: stop_key
 
   - name: dim_route
-    description: One row per route. Most recent name wins; route_name_count shows renames.
+    description: >
+      One row per route. Most recent name wins; route_name_count shows renames.
+      route_type is derived from the route number following the Seoul numbering scheme.
     columns:
       - name: route_no
         data_tests: [unique, not_null]
+      - name: route_number
+        description: Route number as shown to passengers, without 번 and the origin~terminus suffix.
+      - name: route_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['trunk', 'branch', 'express', 'circular', 'night', 'village', 'autonomous', 'commuter', 'custom', 'ferry', 'other']
+      - name: route_variant
+        description: Trailing A or B marking a variant line (계통) of the same route number, e.g. 2115A / 2115B.
+      - name: origin
+        description: First terminus, parsed from the route name.
+      - name: terminus
+        description: Second terminus, parsed from the route name.
 
   - name: dim_stop
     description: >

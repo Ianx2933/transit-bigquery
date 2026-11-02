@@ -90,6 +90,10 @@ unclear. If OD is added later it will be a separate table.
                     |--------------------|
                     | route_no      (PK) |
                     | route_name         |
+                    | route_number       |
+                    | route_type         |
+                    | route_variant      |
+                    | origin / terminus  |
                     | route_name_count   |
                     +---------+----------+
                               |
@@ -134,6 +138,33 @@ When the source has several values for one key, such as a route or stop that app
 more than one name, the value from the most recent month is used, with ties broken
 alphabetically. This makes every build produce the same result. The old `DISTINCT ON` in
 `extract.py` did not guarantee that.
+
+### Route types
+
+Route names in the source look like `121번(화계사~서울숲)` or `성동13(옥수역~성수역)`. `dim_route`
+splits them into the route number, origin and terminus, and assigns a type from the shape of
+the number following the Seoul numbering scheme:
+
+| `route_type` | Rule | Routes |
+|---|---|---|
+| `village` (마을) | area name + number, e.g. 강남01, 강남06-1 | 260 |
+| `branch` (지선) | four digits | 220 |
+| `trunk` (간선) | three digits | 134 |
+| `commuter` | contains 출근 or 퇴근 | 31 |
+| `custom` (맞춤) | four digits starting with 8 | 28 |
+| `night` (심야) | N + number | 14 |
+| `express` (광역) | four digits starting with 9 | 10 |
+| `circular` (순환) | two digits | 2 |
+| `autonomous` (자율주행) | area name + A + number, e.g. 청와대A01, 상암A21 | 2 |
+| `ferry` | 한강버스, the Han River ferry, paid by the same transit card | 1 |
+
+A trailing `A` or `B` after the number (`2115A` / `2115B`) marks a variant line of the same
+route and is stored separately in `route_variant`. It is not the same as the `A` in autonomous
+route numbers. A test fails the build if a route does not match any rule, so a new numbering
+format has to be handled explicitly.
+
+The source contains no Gyeonggi-registered routes. Gyeonggi stops in `dim_stop` come from
+Seoul routes that cross the city boundary.
 
 ---
 
@@ -337,8 +368,6 @@ legacy/                      Warehouse DDL and validation from before dbt (six-m
 
 ## To do
 
-- `route_type` on `dim_route`. Seoul route names indicate the bus type (village, trunk,
-  branch, night), which would explain the naming differences above.
 - `dim_district`. The dong boundary table has the 1,208 administrative units of the
   2025-06-30 snapshot but is still imported by hand upstream.
 - Airflow orchestration of export, load and `dbt build`.
