@@ -42,6 +42,13 @@ counts and passenger totals per month. A load-state file makes reruns idempotent
 script will not append to a table it has no load record for. After loading, it recomputes the
 monthly totals in BigQuery and stops if any month differs. It does not transform anything.
 
+The loader runs unattended: it reads the PostgreSQL password from `PGPASSWORD` or a pgpass
+file and prompts only when neither exists and a terminal is attached, and it talks to BigQuery
+through the Python client, so it needs no `gcloud` or `bq` installation. `load --replace`
+rewrites last month's staging tables; without it the loader refuses to touch a table it did
+not load. Load jobs use a fixed ID per snapshot and table, so a retried submission that
+already reached BigQuery attaches to the existing job instead of loading twice.
+
 **Transform: `transit_dbt/`.** All renames, casts, joins and deduplication are dbt models.
 `dbt build` runs the models and their tests in one step, so a build fails if the data does not
 pass.
@@ -57,6 +64,11 @@ exposed the stop-name issue described below, which the Python version never meas
 | `transit_marts` | Modelled tables, built with `dbt build --target prod` |
 | `dbt_dev` | Development copy of the same models, the default dbt target |
 | `transit_warehouse` | The original six-month load, made before the upstream loader fix. Kept for reference only |
+
+**Orchestration.** An Airflow DAG in
+[SeoulTransitPlatform](https://github.com/Ianx2933/SeoulTransitPlatform) runs
+`preflight -> export -> load --replace -> dbt build --target prod -> cleanup`, with this
+repository mounted read-only into the scheduler. The first full run took about ten minutes.
 
 Staging and the modelled tables are kept in separate datasets so it is always clear which
 tables are copies and which are designed. The tests also reconcile against staging instead of
@@ -300,14 +312,14 @@ month, so the project currently costs nothing.
 
 ```bash
 pip install -r requirements.txt
-python -m unittest test_transit_bigquery      # offline; no PostgreSQL or GCP calls
+python -m unittest test_transit_bigquery      # 16 offline tests; no PostgreSQL or GCP calls
 ```
 
 Load the staging copy:
 
 ```bash
-python transit_bigquery.py export --out export_02   # prompts for the password
-python transit_bigquery.py load  --folder export_02
+python transit_bigquery.py export --out export_02   # PGPASSWORD or pgpass; prompts otherwise
+python transit_bigquery.py load  --folder export_02   # add --replace to rewrite existing tables
 bq query --use_legacy_sql=false < sql/04_staging_geometry_checks.sql
 ```
 
@@ -345,7 +357,7 @@ transit_dbt:
 ```
 
 `requirements.txt` pins `pyarrow>=22` and `psycopg2-binary>=2.9.12`, the first versions with
-Python 3.14 wheels, and `dbt-core` / `dbt-bigquery` 1.12. dbt 1.11 and earlier do not run on
+Python 3.14 wheels, `google-cloud-bigquery` for loading, and `dbt-core` / `dbt-bigquery` 1.12. dbt 1.11 and earlier do not run on
 Python 3.14 (they fail with a `mashumaro` serialization error).
 
 ---
@@ -354,7 +366,7 @@ Python 3.14 (they fail with a `mashumaro` serialization error).
 
 ```
 transit_bigquery.py          Snapshot export and verified staging load
-test_transit_bigquery.py     Offline tests; no PostgreSQL or GCP calls
+test_transit_bigquery.py     16 offline tests with a fake BigQuery client
 transit_dbt/
   models/staging/            Sources and light cleaning of the staging copy
   models/marts/              fct_boarding, dim_route, dim_stop, dim_stop_name_history,
@@ -370,6 +382,7 @@ legacy/                      Warehouse DDL and validation from before dbt (six-m
 
 - `dim_district`. The dong boundary table has the 1,208 administrative units of the
   2025-06-30 snapshot but is still imported by hand upstream.
-- Airflow orchestration of export, load and `dbt build`.
+- Keep the official route type from the source API (`TRFC_MNS_TYPE_NM`) and test the
+  number-based `route_type` rules against it.
 - A flag on `dim_stop` for stops with two names at the same time.
 - Estimated coordinates for unmatched Gyeonggi stops using `route_stop_sequence`.
