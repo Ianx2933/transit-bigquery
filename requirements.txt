@@ -5,3 +5,5 @@ pandas>=2.2
 sqlalchemy>=2.0
 dbt-core>=1.12,<1.13
 dbt-bigquery>=1.12,<1.13
+
+google-cloud-bigquery>=3.25

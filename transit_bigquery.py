@@ -7,7 +7,12 @@ record. The dimensional model is built from that copy by the dbt project
 
 Requires Python 3.14+. Run --help for available commands.
 
-No scheduler, GCS, DML, or PostgreSQL writes are used.
+No GCS, DML, or PostgreSQL writes are used. BigQuery is reached through the
+google-cloud-bigquery client with Application Default Credentials, so the
+script runs the same on Windows and inside the Airflow container.
+
+Unattended runs: the PostgreSQL password comes from PGPASSWORD or a pgpass
+file; the prompt is used only when neither exists and a terminal is attached.
 """
 import argparse
 import getpass
@@ -18,7 +23,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -113,12 +117,35 @@ def save_json(path,obj):
     tmp.replace(path)
 
 
+def pgpass_path():
+    if os.environ.get('PGPASSFILE'): return Path(os.environ['PGPASSFILE'])
+    if os.name=='nt': return Path(os.environ.get('APPDATA',''))/'postgresql'/'pgpass.conf'
+    return Path.home()/'.pgpass'
+
+
+def resolve_password():
+    """PGPASSWORD, then a pgpass file (read by libpq itself), then a prompt.
+
+    Returning None lets libpq look the password up in the pgpass file. The
+    prompt is the last resort and is refused when no terminal is attached,
+    so a scheduled run fails with a clear message instead of hanging."""
+    if os.environ.get('PGPASSWORD'): return None
+    if pgpass_path().is_file(): return None
+    if not sys.stdin.isatty():
+        raise ValueError('No PostgreSQL password: set PGPASSWORD or create '+str(pgpass_path()))
+    return getpass.getpass('PostgreSQL password (hidden): ')
+
+
 def export(args):
     import psycopg2
     import pyarrow.parquet as pq
     out=Path(args.out).resolve()
-    if out.exists(): raise ValueError('Output folder already exists. Choose a NEW --out folder; old exports are preserved.')
-    password=getpass.getpass('PostgreSQL password (hidden): ')
+    if out.exists():
+        if not args.overwrite:
+            raise ValueError('Output folder already exists. Choose a NEW --out folder, or pass --overwrite.')
+        # A retried task finds its own half-written folder; start it again from scratch.
+        shutil.rmtree(out)
+    password=resolve_password()
     conn=psycopg2.connect(host=args.host,port=args.port,user=args.user,
                           dbname=args.dbname,password=password,connect_timeout=15)
     del password
@@ -178,19 +205,20 @@ def export(args):
         conn.close()
 
 
-def bq_call(args,tail):
-    exe=shutil.which('bq') or shutil.which('bq.cmd')
-    if not exe: raise ValueError('bq not found. Use Google Cloud SDK Shell or reopen your terminal.')
-    command=[exe,'--project_id='+args.project,'--location='+LOCATION,'--format=prettyjson']+tail
-    # Windows .cmd wrappers interpret metacharacters; reject unsafe paths and arguments.
-    if os.name=='nt' and any(any(c in arg for c in '\r\n&|<>^%!') for arg in command):
-        raise ValueError('Windows shell metacharacter in argument/path. Move files to a simple path such as C:\\transit_bigquery.')
-    env=os.environ.copy(); env['PYTHONIOENCODING']='utf-8'
-    result=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='replace',env=env)
-    if result.returncode:
-        raise RuntimeError((result.stderr+'\n'+result.stdout).strip())
-    if 'load' in tail: return None
-    return json.loads(result.stdout) if result.stdout.strip() else None
+def bq_client(args):
+    from google.cloud import bigquery
+    return bigquery.Client(project=args.project, location=LOCATION)
+
+
+def table_meta(t):
+    return {'id': t.full_table_id, 'creationTime': str(int(t.created.timestamp()*1000)),
+            'lastModifiedTime': str(int(t.modified.timestamp()*1000)), 'numRows': t.num_rows}
+
+
+def run_query(client, sql, max_bytes):
+    from google.cloud import bigquery
+    cfg = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes, use_legacy_sql=False)
+    return [dict(r.items()) for r in client.query(sql, job_config=cfg).result()]
 
 
 def read_manifest(folder):
@@ -205,39 +233,52 @@ def read_manifest(folder):
 
 
 def load(args):
+    from google.api_core.exceptions import Conflict, NotFound
+    from google.cloud import bigquery
     folder=Path(args.folder).resolve(); m=read_manifest(folder)
-    ds=bq_call(args,['show','--dataset=true',args.project+':'+args.dataset])
-    if ds.get('location','').lower()!=LOCATION: raise ValueError('Dataset must be in '+LOCATION)
+    client=bq_client(args)
+    ds=client.get_dataset(f'{args.project}.{args.dataset}')
+    if (ds.location or '').lower()!=LOCATION: raise ValueError('Dataset must be in '+LOCATION)
     state_path=folder/'load_state.json'
     state=json.loads(state_path.read_text()) if state_path.exists() else {'snapshot_id':m['snapshot_id'],'project':args.project,'dataset':args.dataset,'loaded':{}}
     if (state['snapshot_id'],state['project'],state['dataset'])!=(m['snapshot_id'],args.project,args.dataset):
         raise ValueError('This folder has load state for a different target/snapshot.')
-    existing=bq_call(args,['ls','--max_results=10000',args.project+':'+args.dataset]) or []
-    names={t['tableReference']['tableId'] for t in existing}
+    names={t.table_id for t in client.list_tables(ds)}
     collisions=(names & set(SPECS))-set(state['loaded'])
-    if collisions: raise ValueError('Existing tables have no successful load record for this export; refusing to append/overwrite: '+', '.join(sorted(collisions)))
+    # Without --replace, a table this export did not load is never touched.
+    # With --replace (the monthly scheduled run), each table is truncated and
+    # rewritten from this export; the per-month check in verify() still applies.
+    if collisions and not args.replace:
+        raise ValueError('Existing tables have no successful load record for this export; refusing to overwrite '
+                         '(pass --replace to rewrite them): '+', '.join(sorted(collisions)))
     for table,entry in m['tables'].items():
-        target=args.project+':'+args.dataset+'.'+table
+        target=f'{args.project}.{args.dataset}.{table}'
         if table in state['loaded']:
-            meta=bq_call(args,['show',target])
-            if str(meta.get('id'))!=state['loaded'][table]['id'] or str(meta.get('creationTime'))!=state['loaded'][table]['creationTime'] or str(meta.get('lastModifiedTime'))!=state['loaded'][table]['lastModifiedTime'] or int(meta['numRows'])!=entry['rows']:
+            meta=table_meta(client.get_table(target))
+            if any(str(meta[k])!=state['loaded'][table][k] for k in ('id','creationTime','lastModifiedTime')) or int(meta['numRows'])!=entry['rows']:
                 raise ValueError('Previously loaded table changed: '+table)
             print('SKIP verified previous load: '+table,flush=True)
             continue
-        job='stp_'+m['snapshot_id']+'_'+table
-        # Load each local file atomically into one table; use a fixed job ID to prevent duplicate submission.
-        command=['--job_id='+job,'load','--source_format=PARQUET']
-        if table=='integrated_hourly_transit_demand_light': command+=['--clustering_fields=mode,day_type,service_id,node_id']
-        if table==HOURLY: command+=['--clustering_fields=use_ym,route_no,stop_ars']
-        command += [target,str(folder/entry['file'])]
+        job_id='stp_'+m['snapshot_id']+'_'+table
+        cfg=bigquery.LoadJobConfig(source_format=bigquery.SourceFormat.PARQUET,
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE if args.replace else bigquery.WriteDisposition.WRITE_EMPTY)
+        if table=='integrated_hourly_transit_demand_light': cfg.clustering_fields=['mode','day_type','service_id','node_id']
+        if table==HOURLY: cfg.clustering_fields=['use_ym','route_no','stop_ars']
         print('LOAD '+table,flush=True)
-        bq_call(args,command)
-        meta=bq_call(args,['show',target])
+        # A fixed job ID makes a retried submission safe: if the first attempt
+        # reached BigQuery, the retry attaches to that job instead of loading twice.
+        try:
+            with open(folder/entry['file'],'rb') as f:
+                job=client.load_table_from_file(f,target,job_id=job_id,job_config=cfg,location=LOCATION)
+        except Conflict:
+            job=client.get_job(job_id,location=LOCATION)
+        job.result()
+        meta=table_meta(client.get_table(target))
         if int(meta['numRows'])!=entry['rows']: raise ValueError('BigQuery row count mismatch: '+table)
-        state['loaded'][table]={'id':str(meta['id']),'creationTime':str(meta['creationTime']),'lastModifiedTime':str(meta['lastModifiedTime'])}
+        state['loaded'][table]={k:str(meta[k]) for k in ('id','creationTime','lastModifiedTime')}
         save_json(state_path,state)
         print(f'OK {table}: {entry["rows"]:,} rows',flush=True)
-    verify(args,m)
+    verify(args,m,client)
 
 
 def compare_totals(expected,actual):
@@ -270,14 +311,14 @@ def compare_monthly(expected,actual):
                 raise ValueError(f'Sum mismatch: {ym} {col}')
 
 
-def verify(args,m):
+def verify(args,m,client):
     ref=f'`{args.project}.{args.dataset}.integrated_hourly_transit_demand_light`'
     query=f'SELECT mode,day_type,COUNT(*) AS row_count,SUM(boarding) AS boarding,SUM(alighting) AS alighting FROM {ref} GROUP BY mode,day_type ORDER BY mode,day_type'
-    result=bq_call(args,['query','--use_legacy_sql=false','--maximum_bytes_billed=2147483648','--max_rows=100',query])
+    result=run_query(client,query,2147483648)
     compare_totals(m['demand_totals'],result)
     ref=f'`{args.project}.{args.dataset}.{HOURLY}`'
     query=f'SELECT use_ym,COUNT(*) AS row_count,SUM(boarding_passengers) AS boarding,SUM(alighting_passengers) AS alighting,COUNT(DISTINCT stop_ars) AS distinct_stops FROM {ref} GROUP BY use_ym ORDER BY use_ym'
-    result=bq_call(args,['query','--use_legacy_sql=false','--maximum_bytes_billed=4294967296','--max_rows=1000',query])
+    result=run_query(client,query,4294967296)
     compare_monthly(m.get('hourly_totals') or [],result)
     months=[r['use_ym'] for r in m['hourly_totals']]
     print(f'VERIFIED: all {len(SPECS)} staging table row counts during load; demand group totals match; '
@@ -288,11 +329,17 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest='action',required=True)
     e=sub.add_parser('export'); e.add_argument('--out',default='export_02')
-    e.add_argument('--host',default='localhost'); e.add_argument('--port',type=int,default=5432)
-    e.add_argument('--user',default='postgres'); e.add_argument('--dbname',default='Seoul_Transit')
+    # Defaults follow the libpq environment so the container can point at the
+    # Windows host (PGHOST=host.docker.internal) without changing the command.
+    e.add_argument('--host',default=os.environ.get('PGHOST','localhost'))
+    e.add_argument('--port',type=int,default=int(os.environ.get('PGPORT','5432')))
+    e.add_argument('--user',default=os.environ.get('PGUSER','postgres'))
+    e.add_argument('--dbname',default=os.environ.get('PGDATABASE','Seoul_Transit'))
+    e.add_argument('--overwrite',action='store_true',help='delete an existing --out folder first')
     e.add_argument('--chunk-rows',type=int,default=50000)
     l=sub.add_parser('load'); l.add_argument('--folder',default='export_02')
     l.add_argument('--project',default=PROJECT); l.add_argument('--dataset',default=DATASET)
+    l.add_argument('--replace',action='store_true',help='truncate and rewrite existing staging tables')
     args=p.parse_args()
     if args.action=='export':
         if not 1<=args.chunk_rows<=200000: p.error('--chunk-rows must be 1..200000')
