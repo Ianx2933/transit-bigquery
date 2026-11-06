@@ -1,0 +1,12 @@
+# Blocks a commit that adds a secret. Uses the gitleaks binary on PATH
+# (winget install gitleaks), so no version pin is needed here.
+#   pip install pre-commit
+#   pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: gitleaks git --pre-commit --staged --redact --no-banner --verbose
+        language: system
+        pass_filenames: false

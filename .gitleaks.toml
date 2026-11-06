@@ -1,0 +1,26 @@
+# gitleaks configuration: the default rules plus one for database URLs.
+#
+# The default rules look for tokens with a known shape (cloud keys, GitHub
+# tokens, high-entropy strings). A plain database password inside a connection
+# URL has no shape of its own, and in November 2026 one sat in two example
+# runner scripts without any default rule noticing. The rule below catches the
+# password part of postgres/mysql/jdbc URLs.
+
+title = "Seoul Transit"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "db-url-password"
+description = "Password inside a database connection URL"
+regex = '''(?i)(?:postgres(?:ql)?(?:\+psycopg2)?|mysql|jdbc:postgresql)://[^:/\s"'@]+:([^@\s"'$%{<]+)@'''
+secretGroup = 1
+keywords = ["postgres", "mysql", "jdbc"]
+
+  # Placeholders used in docs, examples and tests are not secrets.
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = [
+    '''^(?i)(password|passwd|pass|pw|p|x|secret|change-?me|changeme|your[_-]?password|\*+)$''',
+  ]
