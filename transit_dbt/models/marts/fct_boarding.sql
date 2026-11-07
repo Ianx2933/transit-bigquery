@@ -1,7 +1,7 @@
 {{ config(
     materialized='table',
     partition_by={'field': 'service_ym', 'data_type': 'int64',
-                  'range': {'start': 202401, 'end': 202701, 'interval': 1}},
+                  'range': {'start': 202401, 'end': 203001, 'interval': 1}},
     cluster_by=['route_no', 'stop_key']
 ) }}
 select
