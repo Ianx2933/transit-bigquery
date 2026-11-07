@@ -1,0 +1,11 @@
+.git
+.github
+**/__pycache__
+**/.pytest_cache
+.venv
+venv
+export_*
+transit_dbt/target
+transit_dbt/logs
+transit_dbt/dbt_packages
+legacy

@@ -1,0 +1,14 @@
+# Profile for the Cloud Run warehouse job. No credentials: `oauth` uses
+# Application Default Credentials, which on Cloud Run are the job's service
+# account. Local development keeps using ~/.dbt/profiles.yml.
+transit_dbt:
+  target: prod
+  outputs:
+    prod:
+      type: bigquery
+      method: oauth
+      project: project-9c77d932-f0d2-47bb-947
+      dataset: transit_marts
+      location: asia-northeast3
+      threads: 4
+      maximum_bytes_billed: 5000000000
