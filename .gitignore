@@ -38,3 +38,4 @@ transit_dbt/dbt_packages/
 export_*/
 
 logs/
+!transit_dbt/seeds/*.csv

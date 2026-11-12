@@ -1,0 +1,22 @@
+version: 2
+seeds:
+  - name: special_days
+    description: >
+      OD days that are not ordinary. public_holiday counts as sunday_holiday;
+      the other kinds exclude the given scope (all / bus / ferry) from typical-day OD.
+      Only days that appear in the OD data need a row.
+    config:
+      column_types: {service_date: date, kind: string, scope: string, note: string}
+    columns:
+      - name: service_date
+        data_tests: [unique, not_null]
+      - name: kind
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['public_holiday', 'strike', 'ferry_suspension']
+      - name: scope
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['all', 'bus', 'ferry']

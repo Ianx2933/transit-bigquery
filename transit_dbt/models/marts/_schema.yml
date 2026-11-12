@@ -79,3 +79,61 @@ models:
         data_tests: [not_null]
       - name: route_stop_seq
         data_tests: [not_null]
+
+  - name: fct_od_stop
+    description: >
+      Corrected stop-to-stop OD per route and day (TOPIS 노선별 OD, one sample day
+      per week type per month). Day-partitioned on service_date, clustered on
+      mode, route_name, board_stop_key. Rows keep the source grain, so a key can
+      repeat when stop names differ (ferry rows without ARS are told apart by name).
+    columns:
+      - name: service_date
+        description: TOPIS 기준일자. Partition key.
+        data_tests: [not_null]
+      - name: day_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['weekday', 'saturday', 'sunday_holiday']
+      - name: excluded_from_typical
+        description: True on special days (seed special_days) for the affected mode.
+        data_tests: [not_null]
+      - name: mode
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['bus', 'ferry']
+      - name: route_name
+        description: >
+          Route number as in the source, the same identifier as dim_route.route_no.
+          NULL on about 150-250 rows a day (about 0.03% of passengers, 2,897 rows on
+          2023-10-17): TOPIS rows without a route name. They are kept so daily totals
+          match the source; route-level analysis drops them, stop-level totals keep them.
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+          - relationships:
+              arguments:
+                to: ref('dim_route')
+                field: route_no
+              config:
+                severity: warn
+      - name: route_id
+        description: >
+          9-digit TOPIS route ID (전환_노선ID) from the 2025-10-14 reference, not
+          dim_route.route_no. NULL for routes the reference does not know; more
+          common the farther a day is from 2025-10-14.
+      - name: board_stop_key
+        description: Boarding stop ARS. NULL for ferry piers and some virtual stops.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_stop')
+                field: stop_key
+              config:
+                severity: warn
+      - name: passengers
+        data_tests: [not_null]

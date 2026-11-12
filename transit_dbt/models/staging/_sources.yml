@@ -9,3 +9,10 @@ sources:
         description: Seoul stop master. Korean column names are aliased to English at export.
       - name: bus_stop_terrain_stats
       - name: terrain_active_dataset
+      - name: od_route_stop
+        description: >
+          Corrected route-level stop-to-stop OD, one TOPIS day per ingestion-time
+          day partition. Loaded by od/od_load.py from od-curated/YYYYMMDD/curated.csv.gz
+          and checked against report.json (rows, passengers, source date).
+      - name: od_route_stop_anomaly
+        description: Rows the correction set aside, same columns and partitioning as od_route_stop.
