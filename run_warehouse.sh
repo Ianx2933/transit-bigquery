@@ -10,6 +10,9 @@
 #   PGPASSWORD         from Secret Manager (db-password)
 #   BQ_PROJECT         BigQuery project holding transit_staging and transit_marts
 #   CLOUD_SQL_INSTANCE project:region:instance, mounted at /cloudsql/<instance>
+#   WAREHOUSE_STEPS    all (default): export, load, OD load, dbt build
+#                      od: only the OD load, for loading corrected OD days by hand
+#                      (gcloud run jobs execute ... --update-env-vars WAREHOUSE_STEPS=od)
 set -euo pipefail
 
 : "${PGPASSWORD:?PGPASSWORD is not set}"
@@ -19,6 +22,18 @@ set -euo pipefail
 export PGHOST="/cloudsql/${CLOUD_SQL_INSTANCE}"
 export PGPORT=5432 PGUSER="${PGUSER:-postgres}" PGDATABASE="${PGDATABASE:-Seoul_Transit}"
 OUT="/tmp/export/$(date -u +%Y%m%dT%H%M%SZ)"
+STEPS="${WAREHOUSE_STEPS:-all}"
+
+if [ "$STEPS" = "od" ]; then
+  echo "== OD load into ${BQ_PROJECT}.transit_staging"
+  python /app/od_load.py --project "$BQ_PROJECT"
+  echo "== done (OD load only)"
+  exit 0
+fi
+if [ "$STEPS" != "all" ]; then
+  echo "WAREHOUSE_STEPS must be all or od, not ${STEPS}" >&2
+  exit 2
+fi
 
 echo "== export from ${CLOUD_SQL_INSTANCE}"
 python /app/transit_bigquery.py export --out "$OUT" --overwrite \
@@ -26,6 +41,9 @@ python /app/transit_bigquery.py export --out "$OUT" --overwrite \
 
 echo "== load into ${BQ_PROJECT}.transit_staging"
 python /app/transit_bigquery.py load --folder "$OUT" --project "$BQ_PROJECT" --replace
+
+echo "== OD load into ${BQ_PROJECT}.transit_staging"
+python /app/od_load.py --project "$BQ_PROJECT"
 
 echo "== dbt build (prod)"
 dbt build --target prod --project-dir /app/transit_dbt
