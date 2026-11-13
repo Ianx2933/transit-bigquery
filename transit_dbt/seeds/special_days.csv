@@ -1,5 +1,5 @@
 service_date,kind,scope,note
 2026-01-13,strike,bus,서울 시내버스 총파업 (대부분 운행 중단)
-2026-02-17,public_holiday,all,설날
+2026-02-17,major_holiday,all,설날 (명절 연휴: 일·공휴일로 분류하되 대표 OD에서는 제외)
 2026-07-18,ferry_suspension,ferry,한강버스 호우로 운항 중단
 2026-07-19,ferry_suspension,ferry,한강버스 호우로 운항 중단

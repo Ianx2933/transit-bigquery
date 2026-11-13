@@ -2,8 +2,11 @@ version: 2
 seeds:
   - name: special_days
     description: >
-      OD days that are not ordinary. public_holiday counts as sunday_holiday;
-      the other kinds exclude the given scope (all / bus / ferry) from typical-day OD.
+      OD days that are not ordinary. public_holiday and major_holiday count as
+      sunday_holiday. Every kind but public_holiday excludes the given scope
+      (all / bus / ferry) from typical-day OD: a strike or a suspension, and the
+      Seollal and Chuseok holidays, whose travel is unlike any Sunday's (Seollal
+      2026-02-17 missed by 80% when predicted from Sundays).
       Only days that appear in the OD data need a row.
     config:
       column_types: {service_date: date, kind: string, scope: string, note: string}
@@ -14,7 +17,7 @@ seeds:
         data_tests:
           - accepted_values:
               arguments:
-                values: ['public_holiday', 'strike', 'ferry_suspension']
+                values: ['public_holiday', 'major_holiday', 'strike', 'ferry_suspension']
       - name: scope
         data_tests:
           - accepted_values:

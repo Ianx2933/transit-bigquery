@@ -12,7 +12,7 @@ with od as (
 special as (
   select
     service_date,
-    logical_or(kind = 'public_holiday')                                as is_public_holiday,
+    logical_or(kind in ('public_holiday', 'major_holiday'))            as is_public_holiday,
     logical_or(kind != 'public_holiday' and scope in ('all', 'bus'))   as excludes_bus,
     logical_or(kind != 'public_holiday' and scope in ('all', 'ferry')) as excludes_ferry
   from {{ ref('special_days') }}
