@@ -20,3 +20,10 @@ seeds:
           - accepted_values:
               arguments:
                 values: ['all', 'bus', 'ferry']
+  - name: seoul_gu
+    description: Seoul gu by the first five digits of adm_cd in admin_dong_boundary (statistical codes, 11010 = 종로구).
+    config:
+      column_types: {gu_code: string, gu_name: string}
+    columns:
+      - name: gu_code
+        data_tests: [unique, not_null]

@@ -16,3 +16,12 @@ sources:
           and checked against report.json (rows, passengers, source date).
       - name: od_route_stop_anomaly
         description: Rows the correction set aside, same columns and partitioning as od_route_stop.
+      - name: od_dong_mode
+        description: >
+          TOPIS 동별_수단OD, one row per (day, origin dong, destination dong): total,
+          subway and bus passengers counted per ride. Every day of every stored month.
+          Partitioned by month. Loaded by od/od_dong_load.py, checked per day against the files.
+      - name: terrain_stop_dong_assignment
+        description: Stop (node_id = standard code) to administrative dong, one per terrain snapshot.
+      - name: admin_dong_boundary
+        description: Administrative dong polygons, base date 20250630. Several rows per dong (polygon parts).
