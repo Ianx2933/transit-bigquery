@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir \
  && dbt --version
 
 COPY transit_bigquery.py run_warehouse.sh ./
-COPY od/od_load.py ./
+COPY od/od_load.py od/od_dong_load.py od/od_typical_export.py ./
 COPY transit_dbt ./transit_dbt
 
 ENTRYPOINT ["bash", "/app/run_warehouse.sh"]

@@ -30,3 +30,12 @@ seeds:
     columns:
       - name: gu_code
         data_tests: [unique, not_null]
+  - name: korea_public_holidays
+    description: >
+      Korean public holidays 2020-2027, copied from SeoulTransitPlatform
+      (pipelines, korea_public_holidays.csv), where tests check it against the calendar.
+    config:
+      column_types: {holiday_date: date, holiday_name: string}
+    columns:
+      - name: holiday_date
+        data_tests: [unique, not_null]
