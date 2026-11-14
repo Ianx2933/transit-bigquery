@@ -6,7 +6,7 @@
 # The image holds no credentials. The job's service account authenticates to
 # BigQuery through Application Default Credentials, and the database password
 # arrives as PGPASSWORD from Secret Manager.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
