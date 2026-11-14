@@ -13,6 +13,10 @@
 #   WAREHOUSE_STEPS    all (default): export, load, OD loads, dbt build, typical OD export
 #                      od: only the OD loads (route stop OD, district mode OD), by hand
 #                      od-typical: only the typical OD export to Cloud Storage, by hand
+#                      od-refresh: OD loads, dbt build, typical OD export; the weekly
+#                                  workflow runs it before the rebuild when a new
+#                                  TOPIS month arrived, so the representative OD
+#                                  the rebuild reads is current
 #                      (gcloud run jobs execute ... --update-env-vars WAREHOUSE_STEPS=od)
 #
 # The typical OD export (od_typical_export.py) writes gs://.../od-typical/<day>/
@@ -42,8 +46,19 @@ if [ "$STEPS" = "od-typical" ]; then
   echo "== done (typical OD export only)"
   exit 0
 fi
+if [ "$STEPS" = "od-refresh" ]; then
+  echo "== OD loads into ${BQ_PROJECT}.transit_staging"
+  python /app/od_load.py --project "$BQ_PROJECT"
+  python /app/od_dong_load.py --project "$BQ_PROJECT"
+  echo "== dbt build (prod)"
+  dbt build --target prod --project-dir /app/transit_dbt
+  echo "== typical OD export to Cloud Storage"
+  python /app/od_typical_export.py --project "$BQ_PROJECT"
+  echo "== done (OD refresh)"
+  exit 0
+fi
 if [ "$STEPS" != "all" ]; then
-  echo "WAREHOUSE_STEPS must be all, od or od-typical, not ${STEPS}" >&2
+  echo "WAREHOUSE_STEPS must be all, od, od-typical or od-refresh, not ${STEPS}" >&2
   exit 2
 fi
 
