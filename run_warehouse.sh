@@ -10,18 +10,22 @@
 #   PGPASSWORD         from Secret Manager (db-password)
 #   BQ_PROJECT         BigQuery project holding transit_staging and transit_marts
 #   CLOUD_SQL_INSTANCE project:region:instance, mounted at /cloudsql/<instance>
-#   WAREHOUSE_STEPS    all (default): export, load, OD loads, dbt build, typical OD export
+#   WAREHOUSE_STEPS    all (default): export, load, OD loads, dbt build, typical OD
+#                                     and district OD exports
 #                      od: only the OD loads (route stop OD, district mode OD), by hand
 #                      od-typical: only the typical OD export to Cloud Storage, by hand
-#                      od-refresh: OD loads, dbt build, typical OD export; the weekly
+#                      od-dong: only the district OD export to Cloud Storage, by hand
+#                      od-refresh: OD loads, dbt build, typical OD and district OD
+#                                  exports; the weekly
 #                                  workflow runs it before the rebuild when a new
 #                                  TOPIS month arrived, so the representative OD
 #                                  the rebuild reads is current
 #                      (gcloud run jobs execute ... --update-env-vars WAREHOUSE_STEPS=od)
 #
 # The typical OD export (od_typical_export.py) writes gs://.../od-typical/<day>/
-# for SeoulTransitPlatform's transit-od-typical-load job; it does nothing when
-# the folder already holds the same numbers.
+# for SeoulTransitPlatform's transit-od-typical-load job, and the district OD
+# export (od_dong_export.py) gs://.../od-dong/<day>/ for transit-od-dong-load;
+# each does nothing when the newest export already holds the same numbers.
 set -euo pipefail
 
 : "${PGPASSWORD:?PGPASSWORD is not set}"
@@ -46,6 +50,12 @@ if [ "$STEPS" = "od-typical" ]; then
   echo "== done (typical OD export only)"
   exit 0
 fi
+if [ "$STEPS" = "od-dong" ]; then
+  echo "== district OD export to Cloud Storage"
+  python /app/od_dong_export.py --project "$BQ_PROJECT"
+  echo "== done (district OD export only)"
+  exit 0
+fi
 if [ "$STEPS" = "od-refresh" ]; then
   echo "== OD loads into ${BQ_PROJECT}.transit_staging"
   python /app/od_load.py --project "$BQ_PROJECT"
@@ -54,11 +64,13 @@ if [ "$STEPS" = "od-refresh" ]; then
   dbt build --target prod --project-dir /app/transit_dbt
   echo "== typical OD export to Cloud Storage"
   python /app/od_typical_export.py --project "$BQ_PROJECT"
+  echo "== district OD export to Cloud Storage"
+  python /app/od_dong_export.py --project "$BQ_PROJECT"
   echo "== done (OD refresh)"
   exit 0
 fi
 if [ "$STEPS" != "all" ]; then
-  echo "WAREHOUSE_STEPS must be all, od, od-typical or od-refresh, not ${STEPS}" >&2
+  echo "WAREHOUSE_STEPS must be all, od, od-typical, od-dong or od-refresh, not ${STEPS}" >&2
   exit 2
 fi
 
@@ -78,5 +90,8 @@ dbt build --target prod --project-dir /app/transit_dbt
 
 echo "== typical OD export to Cloud Storage"
 python /app/od_typical_export.py --project "$BQ_PROJECT"
+
+echo "== district OD export to Cloud Storage"
+python /app/od_dong_export.py --project "$BQ_PROJECT"
 
 echo "== done"
