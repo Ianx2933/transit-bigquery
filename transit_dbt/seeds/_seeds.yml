@@ -39,3 +39,14 @@ seeds:
     columns:
       - name: holiday_date
         data_tests: [unique, not_null]
+  - name: default_hourly_ratio
+    description: >
+      The fallback boarding-hour profile of SeoulTransitPlatform's
+      estimate_hourly_od.py (_RAW_DEFAULT_RATIO, sums to 1.105), used for a
+      route stop without a fitted profile. hourly_profile normalizes it to sum
+      to one, as the Python does. Keep the two copies identical.
+    config:
+      column_types: {hour: int64, raw_ratio: float64}
+    columns:
+      - name: hour
+        data_tests: [unique, not_null]

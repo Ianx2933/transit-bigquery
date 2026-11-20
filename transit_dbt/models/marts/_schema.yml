@@ -137,3 +137,19 @@ models:
                 severity: warn
       - name: passengers
         data_tests: [not_null]
+
+  - name: hourly_profile
+    description: >
+      Boarding-hour profile per route, boarding stop and OD day type, 24 rows
+      summing to one; the rules of estimate_hourly_od.py (weekday = mean of the
+      fitted Monday..Friday profiles, collapsed fits take the default profile).
+      The API splits period OD by it.
+  - name: od_period_days
+    description: Route-OD days per mode and month that may feed a period average (od_typical_days without its window).
+  - name: od_dong_period_days
+    description: District-OD days per mode and month that may feed a period average (od_dong_mode_typical_days without its window).
+  - name: fct_od_dong_daily
+    description: >
+      TOPIS district mode OD per day with Cloud SQL's district codes ('outside'
+      for everywhere outside Seoul), partitioned by day, clustered by day type,
+      origin and destination code. The API averages chosen months from it.

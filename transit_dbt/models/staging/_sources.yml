@@ -5,6 +5,11 @@ sources:
     description: 1:1 copy of the PostgreSQL source, loaded by transit_bigquery.py. No transformation.
     tables:
       - name: hourly_bus_stop_passenger
+      - name: dow_hourly_ratio
+        description: >
+          Hourly boarding share per route, stop and ratio day type (mon..fri, sat,
+          sun_holiday), 24 rows per key, from SeoulTransitPlatform's
+          solve_dow_hourly_ratio (least squares over every stored month).
       - name: bus_stop_location
         description: Seoul stop master. Korean column names are aliased to English at export.
       - name: bus_stop_terrain_stats

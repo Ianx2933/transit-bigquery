@@ -1,6 +1,6 @@
 """Export a read-only PostgreSQL snapshot and load it into BigQuery staging.
 
-This is the ingestion half: a faithful 1:1 copy of thirteen source tables into
+This is the ingestion half: a faithful 1:1 copy of fourteen source tables into
 `transit_staging`, with a manifest, per-file checksums and an idempotent load
 record. The dimensional model is built from that copy by the dbt project
 (transit_dbt/); this script does no transformation.
@@ -45,6 +45,11 @@ SPECS = {
  # Raw source of fact_boarding / dim_route / dim_stop. Loaded untransformed;
  # renames, casts and joins live in dbt models, not here.
  'hourly_bus_stop_passenger': 'use_ym:s route_no:s route_name:s stop_id:s stop_ars:s stop_name:s hour:i boarding_passengers:f alighting_passengers:f',
+ # Hourly boarding profile per route, stop and day type (mon..fri, sat,
+ # sun_holiday), solved by SeoulTransitPlatform's solve_dow_hourly_ratio over
+ # every stored month. BigQuery uses it to split OD of any period or day type
+ # by boarding hour, as estimated_hourly_od does for the typical weekday (2026-11).
+ 'dow_hourly_ratio': 'route_no:s* stop_ars:s* day_type:s* hour:i* avg_boarding_passengers:f boarding_ratio:f method:s',
 }
 HOURLY = 'hourly_bus_stop_passenger'
 ALIASES = {'노드id':'node_id','정류장번호':'stop_no','정류장명':'stop_name',
@@ -264,6 +269,7 @@ def load(args):
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE if args.replace else bigquery.WriteDisposition.WRITE_EMPTY)
         if table=='integrated_hourly_transit_demand_light': cfg.clustering_fields=['mode','day_type','service_id','node_id']
         if table==HOURLY: cfg.clustering_fields=['use_ym','route_no','stop_ars']
+        if table=='dow_hourly_ratio': cfg.clustering_fields=['day_type','route_no','stop_ars']
         print('LOAD '+table,flush=True)
         # A fixed job ID makes a retried submission safe: if the first attempt
         # reached BigQuery, the retry attaches to that job instead of loading twice.

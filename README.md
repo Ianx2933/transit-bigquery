@@ -36,7 +36,7 @@ stored as `GEOGRAPHY` here for analysis; spatial serving stays on PostGIS.
 PostgreSQL --(transit_bigquery.py)--> transit_staging --(dbt)--> modelled tables
 ```
 
-**Extract and load: `transit_bigquery.py`.** Exports 13 source tables from a read-only
+**Extract and load: `transit_bigquery.py`.** Exports 14 source tables from a read-only
 `REPEATABLE READ` snapshot and writes a manifest with a SHA-256 checksum per file and row
 counts and passenger totals per month. A load-state file makes reruns idempotent, and the
 script will not append to a table it has no load record for. After loading, it recomputes the
@@ -60,7 +60,7 @@ exposed the stop-name issue described below, which the Python version never meas
 
 | Dataset | Contents |
 |---|---|
-| `transit_staging` | 1:1 copy of 13 source tables: same column names and grain, geometry as EPSG:4326 WKT |
+| `transit_staging` | 1:1 copy of 14 source tables: same column names and grain, geometry as EPSG:4326 WKT |
 | `transit_marts` | Modelled tables, built with `dbt build --target prod` |
 | `dbt_dev` | Development copy of the same models, the default dbt target |
 | `transit_warehouse` | The original six-month load, made before the upstream loader fix. Kept for reference only |
