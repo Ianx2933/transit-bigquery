@@ -153,3 +153,9 @@ models:
       TOPIS district mode OD per day with Cloud SQL's district codes ('outside'
       for everywhere outside Seoul), partitioned by day, clustered by day type,
       origin and destination code. The API averages chosen months from it.
+  - name: fct_od_dong_month
+    description: >
+      District OD per month, day type, origin and destination code, summed over
+      the period days of each mode (od_dong_period_days). The API divides the
+      chosen months by their day counts for a period mean. Partitioned by month,
+      clustered by day type, origin and destination.
