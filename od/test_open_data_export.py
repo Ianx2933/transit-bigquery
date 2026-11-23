@@ -149,6 +149,21 @@ class OpenDataExportTest(unittest.TestCase):
         app.run(self.storage, self.bq, BQ, args())
         self.assertEqual(len(self.bq.extracts), first)
 
+    def test_changed_text_rewrites_manifest_only(self):
+        app.run(self.storage, self.bq, BQ, args())
+        first = len(self.bq.extracts)
+        old = app.ATTRIBUTION
+        try:
+            app.ATTRIBUTION = {'ko': '새 문구', 'en': 'new text'}
+            app.run(self.storage, self.bq, BQ, args())
+        finally:
+            app.ATTRIBUTION = old
+        self.assertEqual(len(self.bq.extracts), first)
+        for path in ('releases/20261020/manifest.json', 'latest/manifest.json'):
+            manifest = json.loads(self.storage.objects[path])
+            self.assertEqual(manifest['attribution']['ko'], '새 문구')
+            self.assertTrue(all(f['bytes'] for f in manifest['files']))
+
     def test_changed_rows_export_again(self):
         app.run(self.storage, self.bq, BQ, args())
         self.bq.num_rows = 7

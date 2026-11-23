@@ -41,10 +41,10 @@ MAX_BYTES = 5 * 1024 ** 3
 
 ATTRIBUTION = {
     'ko': '원천: 서울특별시 대중교통 이용 자료(서울 열린데이터광장, 공공데이터포털; 공공누리 제1유형). '
-          '이 파일은 개인 프로젝트 Seoul Transit Platform이 가공한 것이며 서울시 공식 자료가 아닙니다.',
+          '이 파일은 Seoul Transit Platform이 서울특별시 자료를 가공한 것이며 서울특별시 공식 자료가 아닙니다.',
     'en': 'Source: Seoul Metropolitan Government public transport data (Seoul Open Data Plaza, data.go.kr; '
-          'KOGL Type 1, attribution). Processed by Seoul Transit Platform, a personal project; '
-          'not an official Seoul Metropolitan Government release.',
+          'KOGL Type 1, attribution). Processed by Seoul Transit Platform from Seoul Metropolitan '
+          'Government data; not an official Seoul Metropolitan Government release.',
 }
 
 
@@ -177,32 +177,46 @@ def run(storage_client, client, bq, args, now=None):
     if args.dry_run:
         return
 
-    # 2. Files, unless this release already holds the same rows.
+    # 2. Files, unless this release already holds the same rows. When only the
+    #    text (attribution, descriptions) changed, the manifest alone is rewritten.
     manifest_blob = bucket.blob(f'{folder}/manifest.json')
     rows_by_name = {t['name']: t['rows'] for t in tables}
-    if manifest_blob.exists() and same_rows(json.loads(manifest_blob.download_as_bytes()), rows_by_name):
-        print(f'gs://{bucket_name}/{folder}/ already holds these rows; files left as they are.', flush=True)
-    else:
-        if manifest_blob.exists():
-            manifest_blob.delete()
-        files = []
-        for t in tables:
-            size = write_file(storage_client, bucket, client, bq, bucket_name, folder, t, release)
-            files.append({k: t[k] for k in ('name', 'rows', 'columns', 'description', 'notes')}
-                         | {'file': f'{t["name"]}.csv.gz', 'bytes': size})
-        manifest = {
+    old = json.loads(manifest_blob.download_as_bytes()) if manifest_blob.exists() else None
+
+    def manifest_for(sizes, generated_at):
+        files = [{k: t[k] for k in ('name', 'rows', 'columns', 'description', 'notes')}
+                 | {'file': f'{t["name"]}.csv.gz', 'bytes': sizes.get(t['name'])} for t in tables]
+        return {
             'release': release,
             'window_start': window['window_start'],
             'window_end': window['window_end'],
-            'generated_at': now.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'generated_at': generated_at,
             'license': 'KOGL Type 1 (공공누리 제1유형): attribution',
             'attribution': ATTRIBUTION,
             'bigquery_dataset': f'{args.project}.{args.open_dataset}',
             'files': files,
         }
+
+    def upload(manifest):
         manifest_blob.upload_from_string(json.dumps(manifest, ensure_ascii=False, indent=2),
                                          content_type='application/json')
-        print(f'EXPORTED: gs://{bucket_name}/{folder}/ ({len(files)} files, manifest last)', flush=True)
+
+    if old is not None and same_rows(old, rows_by_name):
+        sizes = {f['name']: f.get('bytes') for f in old.get('files', [])}
+        manifest = manifest_for(sizes, old.get('generated_at'))
+        if manifest == old:
+            print(f'gs://{bucket_name}/{folder}/ already holds these rows; files left as they are.', flush=True)
+        else:
+            upload(manifest)
+            print(f'gs://{bucket_name}/{folder}/ same rows; manifest text updated, files left as they are.',
+                  flush=True)
+    else:
+        if old is not None:
+            manifest_blob.delete()
+        sizes = {t['name']: write_file(storage_client, bucket, client, bq, bucket_name, folder, t, release)
+                 for t in tables}
+        upload(manifest_for(sizes, now.strftime('%Y-%m-%dT%H:%M:%SZ')))
+        print(f'EXPORTED: gs://{bucket_name}/{folder}/ ({len(tables)} files, manifest last)', flush=True)
 
     # 3. latest/ = this release (manifest last, stale files removed).
     latest = f'{base}latest'
