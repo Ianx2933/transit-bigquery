@@ -11,10 +11,12 @@
 #   BQ_PROJECT         BigQuery project holding transit_staging and transit_marts
 #   CLOUD_SQL_INSTANCE project:region:instance, mounted at /cloudsql/<instance>
 #   WAREHOUSE_STEPS    all (default): export, load, OD loads, dbt build, typical OD
-#                                     and district OD exports
+#                                     and district OD exports, open data files
 #                      od: only the OD loads (route stop OD, district mode OD), by hand
 #                      od-typical: only the typical OD export to Cloud Storage, by hand
 #                      od-dong: only the district OD export to Cloud Storage, by hand
+#                      open-data: only the open data files (transit_open and
+#                                 gs://seoul-transit-open-data), by hand
 #                      od-refresh: OD loads, dbt build, typical OD and district OD
 #                                  exports; the weekly
 #                                  workflow runs it before the rebuild when a new
@@ -26,6 +28,9 @@
 # for SeoulTransitPlatform's transit-od-typical-load job, and the district OD
 # export (od_dong_export.py) gs://.../od-dong/<day>/ for transit-od-dong-load;
 # each does nothing when the newest export already holds the same numbers.
+# The open data export (open_data_export.py) writes the public download files;
+# it runs last and a failure there is reported without failing the run, so the
+# platform's loads after this job are never held up by the public files.
 set -euo pipefail
 
 : "${PGPASSWORD:?PGPASSWORD is not set}"
@@ -56,6 +61,12 @@ if [ "$STEPS" = "od-dong" ]; then
   echo "== done (district OD export only)"
   exit 0
 fi
+if [ "$STEPS" = "open-data" ]; then
+  echo "== open data files"
+  python /app/open_data_export.py --project "$BQ_PROJECT"
+  echo "== done (open data only)"
+  exit 0
+fi
 if [ "$STEPS" = "od-refresh" ]; then
   echo "== OD loads into ${BQ_PROJECT}.transit_staging"
   python /app/od_load.py --project "$BQ_PROJECT"
@@ -70,7 +81,7 @@ if [ "$STEPS" = "od-refresh" ]; then
   exit 0
 fi
 if [ "$STEPS" != "all" ]; then
-  echo "WAREHOUSE_STEPS must be all, od, od-typical, od-dong or od-refresh, not ${STEPS}" >&2
+  echo "WAREHOUSE_STEPS must be all, od, od-typical, od-dong, open-data or od-refresh, not ${STEPS}" >&2
   exit 2
 fi
 
@@ -93,5 +104,10 @@ python /app/od_typical_export.py --project "$BQ_PROJECT"
 
 echo "== district OD export to Cloud Storage"
 python /app/od_dong_export.py --project "$BQ_PROJECT"
+
+echo "== open data files"
+if ! python /app/open_data_export.py --project "$BQ_PROJECT"; then
+  echo "WARNING: open data export failed; rerun with WAREHOUSE_STEPS=open-data" >&2
+fi
 
 echo "== done"
