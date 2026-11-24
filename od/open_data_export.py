@@ -41,9 +41,9 @@ MAX_BYTES = 5 * 1024 ** 3
 
 ATTRIBUTION = {
     'ko': '원천: 서울특별시 대중교통 이용 자료(서울 열린데이터광장, 공공데이터포털; 공공누리 제1유형). '
-          '이 파일은 Seoul Transit Platform이 서울특별시 자료를 가공한 것이며 서울특별시 공식 자료가 아닙니다.',
+          '이 파일은 CityRiderMap(cityridermap.com)이 서울특별시 자료를 가공한 것이며 서울특별시 공식 자료가 아닙니다.',
     'en': 'Source: Seoul Metropolitan Government public transport data (Seoul Open Data Plaza, data.go.kr; '
-          'KOGL Type 1, attribution). Processed by Seoul Transit Platform from Seoul Metropolitan '
+          'KOGL Type 1, attribution). Processed by CityRiderMap (cityridermap.com) from Seoul Metropolitan '
           'Government data; not an official Seoul Metropolitan Government release.',
 }
 
