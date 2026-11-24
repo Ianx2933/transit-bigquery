@@ -10,6 +10,10 @@ sources:
           Hourly boarding share per route, stop and ratio day type (mon..fri, sat,
           sun_holiday), 24 rows per key, from SeoulTransitPlatform's
           solve_dow_hourly_ratio (least squares over every stored month).
+      - name: month_day_count
+        description: >
+          Days of each day type (mon..fri, sat, sun_holiday) in each month, from
+          SeoulTransitPlatform's build_month_day_count.
       - name: bus_stop_location
         description: Seoul stop master. Korean column names are aliased to English at export.
       - name: bus_stop_terrain_stats
