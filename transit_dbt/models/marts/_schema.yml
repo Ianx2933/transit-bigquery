@@ -159,3 +159,18 @@ models:
       the period days of each mode (od_dong_period_days). The API divides the
       chosen months by their day counts for a period mean. Partitioned by month,
       clustered by day type, origin and destination.
+
+  - name: od_stop_by_route
+    description: >
+      fct_od_stop's columns the API reads, clustered on route_name and service_date,
+      not partitioned. The API's period queries by route read this (a few MB) instead
+      of fct_od_stop, whose one-day partitions are too small for clustering to prune.
+  - name: od_stop_by_board
+    description: As od_stop_by_route, clustered on board_stop_key, for period queries by boarding stop.
+  - name: od_stop_by_alight
+    description: As od_stop_by_route, clustered on alight_stop_key, for period queries by alighting stop.
+  - name: od_route_month_range
+    description: First and last month of each route in fct_od_stop, for the API's route-range lookup.
+    columns:
+      - name: route_name
+        data_tests: [not_null, unique]
